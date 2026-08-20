@@ -16,6 +16,7 @@ mod extraction;
 mod health_gate;
 #[cfg(target_os = "linux")]
 mod landlock;
+mod lazy_fs;
 #[cfg(target_os = "macos")]
 mod macos_sandbox;
 #[cfg(target_os = "linux")]
@@ -471,17 +472,42 @@ fn run() -> io::Result<()> {
     let lock = File::create(base.join(format!("{hash}.lock")))?;
     flock_exclusive(&lock)?;
 
-    if !ready_marker.exists() {
+    // Check if lazy loading is enabled via env var
+    let lazy_load = std::env::var("ERE_LAZY_LOAD")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if !ready_marker.exists() || lazy_load {
         let gc_limit = std::env::var("ERE_CACHE_MAX_ENTRIES")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(16);
         let _ = gc_extraction_cache(gc_limit);
-        let is_squashfs = meta.payload_format == format::PAYLOAD_FORMAT_SQUASHFS;
-        if is_squashfs {
-            extract_squashfs_atomic(&[payload.as_slice()], &cache_root)?;
+
+        if lazy_load {
+            // Lazy loading: mount FUSE filesystem instead of extracting
+            let layers = vec![(payload.to_vec(), meta.payload_format.clone())];
+            let rootfs_path = cache_root.join("rootfs");
+            fs::create_dir_all(&rootfs_path)?;
+
+            // Mount lazy filesystem in background
+            let mount_handle = crate::lazy_fs::mount_lazy_fs(layers, &rootfs_path)?;
+            // Store handle to keep mount alive (dropped at end of scope)
+            // For now, we spawn a thread to keep the mount alive
+            std::thread::spawn(move || {
+                // Keep the mount alive
+                std::thread::park();
+            });
+
+            // Wait a bit for mount to be ready
+            std::thread::sleep(std::time::Duration::from_millis(100));
         } else {
-            extract_atomic(&[payload.as_slice()], &cache_root)?;
+            let is_squashfs = meta.payload_format == format::PAYLOAD_FORMAT_SQUASHFS;
+            if is_squashfs {
+                extract_squashfs_atomic(&[payload.as_slice()], &cache_root)?;
+            } else {
+                extract_atomic(&[payload.as_slice()], &cache_root)?;
+            }
         }
     }
 

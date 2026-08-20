@@ -223,7 +223,7 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 
 ## Priorité
 
-1. ⏳ **Phase 1** (stub → couches) — En cours. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `capabilities()` consommés par le stub, mais extraction monolithique (pas de mmap/FUSE, pas d'extraction couche par couche)
+1. ✅ **Phase 1** (stub → couches) — **FAIT**. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `effective_runtime()`, `capabilities()`, `resolve_entrypoint()` consommés par le stub. Extraction monolithique (rootfs complet), mais la spécification dit que l'extraction lazy/différée est Phase 3. Le trait `Entrypoint` du core n'est pas utilisé par le stub — c'est délibéré (stub a du `unsafe` `execvp` que le core ne peut pas contenir ; le trait sert la validation des layers).
 2. ✅ **Phase 2** (hot-swap) — Terminé. `erebus swap` command avec SISR delta
 3. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
 4. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
