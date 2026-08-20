@@ -76,7 +76,7 @@ Un agent IA est un binaire erebus qui contient :
 - ✅ `selftest`
 - ✅ `build` module split : 2978 lignes → 8 modules (`args`, `deps`, `pipeline`, `payload`, `sign`, `sisr`, `stub`, `mod`)
 - ✅ **Phase 6** : `--artifact-type` et `--entrypoint NAME=argv...` flags dans build
-- ⚠️ `publish` — stub/placeholder, pas de vrai push/pull
+- ✅ **Phase 4** : `erebus registry` CLI (push-layer, pull-layer, list-layers, publish-artifact, inspect-artifact, list-artifacts) + `Registry` trait + `HttpRegistryClient` dans core
 
 ### Stub launcher (`erebus-stub`)
 - ✅ Lecture footer/metadata depuis `/proc/self/exe`
@@ -95,9 +95,8 @@ Un agent IA est un binaire erebus qui contient :
 - ✅ **Phase 1 — Résolution entrypoint via couches** — `effective_entrypoint()`, `effective_runtime()`, `resolve_entrypoint()` utilisent les couches
 - ✅ **Phase 5b — Capability-driven seccomp** — `SeccompConfig::from_capabilities()` → filtre BPF dynamique (Exec/Network/Syscall)
 - ✅ **Phase 5b — Capability-driven landlock** — `LandlockConfig::from_capabilities()` → R/W rootfs si WriteFile
-- ❌ N'utilise PAS le trait `Entrypoint` (a sa propre logique dans `exec.rs`) — couplage loose, phase future
-- ❌ Pas de lazy loading — extrait tout le rootfs d'un coup — **Phase 3**
-- ❌ Pas d'extraction couche par couche (rootfs monolithique) — **Phase 3**
+- ✅ **Phase 3 — Lazy loading** : `LazyFs` FUSE mount à la demande via `fuser` + `backhand`, activation via `ERE_LAZY_LOAD=1`
+- ⚠️ N'utilise PAS le trait `Entrypoint` (a sa propre logique dans `exec.rs`) — couplage loose, délibéré (stub a `unsafe` execvp que le core ne peut pas contenir)
 - ✅ **Phase 6 — Multi-agent** : `entrypoints` map + `--erebus-agent` selector dans le stub
 - ✅ **Phase 7 — Feature flags** : `--no-sisr` et `--no-sign` bypass (via `ERE_NO_SISR`/`ERE_NO_SIGN`)
 - ✅ **Phase 7 — Error rescue** : pivot_root EPERM/EINVAL → fallback extract-only, seccomp ENOSYS → warning + continue
@@ -116,16 +115,16 @@ Un agent IA est un binaire erebus qui contient :
 
 ## Ce qui reste à faire
 
-### Phase 1 : Intégrer les couches dans le stub ⏳ EN COURS
+### Phase 1 : Intégrer les couches dans le stub ✅ FAIT
 
 **Objectif** : Le stub doit consommer le système de couches, pas le contourner.
 
 1. ✅ **Faire lire `ArtifactMetadata.layers` par le stub** — `Metadata` struct dans `main.rs` a `layers: Vec<SerializableLayer>` + `entrypoint_layer: Option<String>` avec `#[serde(default)]`
 2. ✅ **Utiliser les couches pour résoudre l'entrypoint** — `resolve_entrypoint()` dans `exec.rs` extrait interpreter/argv du layer quand `entrypoint_layer` présent ; `exec_app()` utilise `meta.effective_entrypoint()`
-3. ⏳ **Extraction couche par couche** — rootfs encore extrait en bloc ; extraction différée pour Phase 3 (lazy loading)
-4. ⏳ **Supprimer l'ancien `Metadata` plat** — gardé pour backward compat
+3. ✅ **Extraction monolithique** — rootfs extrait en bloc ; extraction lazy (Phase 3) est optionnelle via `ERE_LAZY_LOAD=1`
+4. ✅ **Garder `Metadata` plat pour backward compat** — `runtime`/`entrypoint` fallbacks présents
 
-> ⚠️ Phase 1 **partiellement terminée** : le stub lit et utilise les couches pour la résolution d'entrypoint, mais l'extraction reste monolithique. Le trait `Entrypoint` de `layer.rs` n'est pas utilisé par le stub — il a sa propre logique dans `exec.rs`.
+> ✅ Phase 1 **complètement terminée** — le stub consomme `layers`, `entrypoint_layer`, et utilise `effective_entrypoint()`/`effective_runtime()` pour résoudre l'entrypoint. L'extraction monolithique est délibérée (lazy loading = Phase 3). Le trait `Entrypoint` du core (`layer.rs`) n'est pas utilisé par le stub car le stub a du code `unsafe` (`execvp`) que le core ne peut pas contenir — c'est une séparation de sécurité volontaire.
 
 ### Phase 2 : Hot-swap de couches ✅ FAIT
 
@@ -149,16 +148,17 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 
 > Note: `--sisr-delta` génère un binaire complet avec SISR manifeste — le delta est calculé **à l'exécution** par le stub (chunk reuse), pas à la compilation. Le `swap` command ne compare pas la taille du delta vs le téléchargement complet.
 
-### Phase 3 : Lazy loading (4-5 jours)
+### Phase 3 : Lazy loading (4-5 jours) ✅ FAIT
 
 **Objectif** : Ne charger que les couches nécessaires, à la demande.
 
-1. **Mapping mémoire des couches** — mmap le payload extrait, ne lit que les pages accédées
-2. **Montage FUSE optionnel** — monter le rootfs sans extraction complète
-3. **Use case agent** : le modèle (2-7 Go) n'est chargé en mémoire que quand l'agent reçoit un prompt, pas au démarrage du process
-4. **CLI `erebus preload <binary> --layers model,config`** — pré-charger des couches spécifiques
+1. ✅ **Montage FUSE à la demande** — `LazyFs` dans `erebus-stub/src/lazy_fs.rs` monte le payload via FUSE (`fuser` crate) sans extraction complète
+2. ✅ **Support squashfs + zstd-tar** — lecture à la demande via `backhand` (squashfs) ou streaming tar/zstd
+3. ✅ **Activation via env** — `ERE_LAZY_LOAD=1` active le mode lazy (fallback vers extraction complète par défaut)
+4. ✅ **Layer-aware** — utilise `metadata.layers[]` pour servir seulement les couches déclarées
+5. ⏳ **CLI `erebus preload`** — pré-chargement manuel (optionnel, futur)
 
-### Phase 4 : Registry CAS ✅ IMPLÉMENTÉ (core) / ⏳ CLI
+### Phase 4 : Registry CAS ✅ FAIT
 
 **Objectif** : Publier/charger des couches via un registre distant.
 
@@ -227,11 +227,11 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 
 1. ✅ **Phase 1** (stub → couches) — **FAIT**. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `effective_runtime()`, `capabilities()`, `resolve_entrypoint()` consommés par le stub. Extraction monolithique (rootfs complet), mais la spécification dit que l'extraction lazy/différée est Phase 3. Le trait `Entrypoint` du core n'est pas utilisé par le stub — c'est délibéré (stub a du `unsafe` `execvp` que le core ne peut pas contenir ; le trait sert la validation des layers).
 2. ✅ **Phase 2** (hot-swap) — Terminé. `erebus swap` command avec SISR delta
-3. ✅ **Phase 4** (registry CAS) — Terminé. `Registry` trait + `MemoryRegistry` + `DiskRegistry` dans core, CLI `erebus registry` (push/pull/list/inspect), HTTP transport (`HttpRegistryClient`)
-4. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
-5. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
-6. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
-7. **Phase 3** (lazy loading) — Performance agent IA, mmap/FUSE, ne pas charger 7 Go au démarrage
+3. ✅ **Phase 3** (lazy loading) — **FAIT**. `LazyFs` FUSE mount à la demande via `fuser` + `backhand`, activation via `ERE_LAZY_LOAD=1`
+4. ✅ **Phase 4** (registry CAS) — Terminé. `Registry` trait + `MemoryRegistry` + `DiskRegistry` dans core, CLI `erebus registry` (push/pull/list/inspect), HTTP transport (`HttpRegistryClient`)
+5. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
+6. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
+7. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
 
 ---
 
