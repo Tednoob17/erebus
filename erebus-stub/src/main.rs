@@ -486,7 +486,7 @@ fn run() -> io::Result<()> {
 
         if lazy_load {
             // Lazy loading: mount FUSE filesystem instead of extracting
-            let layers = vec![(payload.to_vec(), meta.payload_format.clone())];
+            let layers = vec![(payload.clone(), meta.payload_format.clone())];
             let rootfs_path = cache_root.join("rootfs");
             fs::create_dir_all(&rootfs_path)?;
 

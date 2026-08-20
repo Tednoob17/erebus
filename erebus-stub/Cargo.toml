@@ -37,6 +37,7 @@ ureq = "3"                # HTTPS client for --erebus-update (rustls + ring, bui
 tempfile = "3"            # temp files for macOS sandbox profiles
 zstd = { version = "0.13", features = ["zstdmt"] }  # multithreaded zstd decompression for cold start
 walkdir = "2"               # recursive directory scan for native libs
+fuser = "0.18"              # FUSE filesystem for lazy loading
 
 [dev-dependencies]
 erebus-core = { path = "../erebus-core" }

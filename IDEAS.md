@@ -1,182 +1,163 @@
-# IDEES — Compilation complete
+# IDEAS.md — erebus & Beyond
 
-## 1. Position A : Format artefact universel (DEAD CODE)
-**Description** : SISR comme moat + layer graph (RuntimeLayer, AppLayer, ModelLayer, ToolLayer, ConfigLayer) → un format `.ere` extensible a tout type d'artefact
+Collected ideas, research findings, and future directions. Includes both what erebus can do today and what would need separate tools.
 
-### Code analysis findings
-- `layer.rs` = DEAD CODE : `Layer` trait, `SerializableLayer`, `Capability`, `Entrypoint` — exists mais jamais branches dans le pipeline production
-- `ArtifactMetadata` = DEAD CODE : importe seulement par `metadata.rs` tests, jamais par pipeline
-- `Cas.rs` (CAS trait) = DEAD CODE : defini mais pas utilise par le stub/runtime
-- `Metadata { runtime: String, entrypoint: Vec<String>, services }` = format PLAT, utilisé par vrai pipeline
+---
 
-### Status du code (verifié)
-- `layer.rs` : 100 matches grep, mais imports only in `metadata.rs` tests (lignes 7, 358, 393)
-- `ArtifactMetadata` : zero imports en dehors de `metadata.rs` tests
-- `CAS trait` : defini mais jamais importe par le stub ou CLI production path
-- Stub et CLI utilisent `build_meta_json()` → `AssemblyInput` → `assemble_erebus()` — format plat
-- `cargo check` + `cargo clippy` + `cargo test` tous passes, zéro warnings
+## What erebus Solves Today (Linux Edge Gateways)
 
-## 2. Position B : Compilateur vers formats existants (--to flag)
-**Description** : `erebus build . --to [oci|appimage|wasm]` → single build, sortie multiple formats
+### Core Value Prop
+**Single self-extracting ELF** containing: `[stub][runtime][model][prompt][tools][config]`
+- No daemon, no container runtime, no registry required
+- Runs on any Linux (Yocto, Buildroot, Debian, Ubuntu Core, Alpine)
+- ARM64, x86_64, RISC-V (musl static)
 
-### Formats cibles
-- **OCI/Docker** : stub → Dockerfile equivalent, payload squashfs → couche OCI
-- **AppImage** : stub .erebus (ELF statique, musl) → AppImage runtime, payload squashfs → AppDir  
-- **WASM** : runtime → WASM via Pyodide/Node WASM, payload → WASI preopen
+### Concrete IoT Use Cases (Linux-based)
 
-### Usage
-```bash
-# Multi-format : un seul build → 3 formats
-erebus build ./myapp --to oci,appimage,wasm --target linux-x64,linux-arm64 -o out/
+| Segment | Devices | Pain Point | erebus Solution |
+|---------|---------|------------|-----------------|
+| **Industrial edge gateways** | RK3566, i.MX8, Jetson Orin, Pi CM4, Advantech, Moxa | Full OS rebuild (100-500MB) for model update | `erebus swap model` + SISR delta (5-10MB) |
+| **Smart cameras / vision AI** | Jetson, Coral, Luxonis OAK, custom ARM64 | Model drift, cellular bandwidth cost | Delta update over 4G/LoRa, atomic rollback |
+| **PLC / controllers (Linux)** | Revolution Pi, Moxa UC, Advantech UNO | Safety certification, IEC 62443 | Ed25519 signing, capability sandbox, health-gated rollback |
+| **Energy / smart grid** | Substation gateways, solar inverters, EV chargers | Remote, intermittent connectivity, CRA compliance | Offline-first, signed updates, capability-driven (no net if not declared) |
+| **Fleet / telematics** | Vehicle gateways, railway wayside boxes | Staged rollout, canary, health-gated rollback | Health gate + fleet manager integration |
 
-# SISR cross-format : meme chunk engine pour tous
-erebus build ./myapp --to oci,appimage,wasm --enable-sisr --update-url https://updates.example.com
+### What's Already Implemented
+- ✅ Phase 1: Stub reads `layers[]`, `effective_entrypoint()`, `capabilities()`
+- ✅ Phase 2: `erebus swap <binary> <layer> <file> --sisr-delta --key`
+- ✅ Phase 5b: Capability-driven seccomp (Exec/Network/Syscall) + Landlock (WriteFile)
+- ✅ Security: Ed25519 signing, AES-256-GCM encryption, lru soundness fix
+- ✅ SISR: Content-defined chunking, Merkle tree, delta updates, health-gated rollback
+
+---
+
+## What erebus CANNOT Do Today (Bare-Metal MCU / TinyML)
+
+### The Gap
+erebus stub = Linux-only (`pivot_root`, `libc`, `execvp`, Linux syscalls).
+**Does not run on:** Cortex-M, ESP32, Zephyr, FreeRTOS, bare metal.
+
+### Existing Solutions (Don't Reinvent)
+| Tool | Approach | Target |
+|------|----------|--------|
+| **Minerva** (EuroSys'26) | Linker-isolated "capsules" with fixed `predict()` entrypoint; in-place `memcpy` swap, no reboot | ARM Cortex-M (nRF52840), Zephyr-ready |
+| **TinyMLDelta** | Binary diff patches (RLE + CRC32), A/B flash slots, crash-safe journal | TFLite Micro, Arduino UNO Q, Zephyr, ESP32 |
+| **RIOT-ML** | SUIT manifests (RFC 9019), CoAP registry, uTVM compilation | RIOT OS, Cortex-M, ESP32, RISC-V |
+| **Zephyr LLEXT** | Linkable Loadable Extensions — load ELF modules at runtime | Zephyr RTOS, 500+ boards |
+| **mallorn** | Tensor-aware diffing (ZipNN), GGUF/TFLite/ONNX/SafeTensors, Ed25519, WASM | MCU-friendly streaming patch apply |
+
+### What Would Be Needed for erebus on MCU (Separate Tool: `erebus-mcu`)
+
+| Component | Effort | Notes |
+|-----------|--------|-------|
+| **Freestanding stub** | High | No `libc`, no `pivot_root`. Custom linker script for capsule regions. |
+| **Capsule runtime** | High | Linker-isolated `.container-code` / `.container-data` sections, fixed `predict()` address. |
+| **SUIT manifest (RFC 9019)** | Medium | Standard for MCU OTA. Integrate with `cbor` crate. |
+| **A/B flash slot manager** | Medium | Atomic slot flip, crash-safe journal (power-loss recovery). |
+| **Flash-aware `AtomicWriter`** | Medium | Port current `AtomicWriter` to flash partitions (not filesystem). |
+| **Delta patcher** | Low | Reuse `mallorn` / `TinyMLDelta` logic for tensor-aware diffs. |
+| **Zephyr/RTOS integration** | Medium | LLEXT for Zephyr, native for bare metal. |
+
+### Architecture Sketch: `erebus-mcu`
 ```
-
-### Valeur unique
-- SISR qui traverse tous les formats (OCI + AppImage + WASM)
-- Build once, deploy everywhere
-- Pas d'outil existant ne fait ça (voir analyse concurrentielle)
-
-## 3. Analyse concurrentielle (recherche web 2025-2026)
-
-### Tools existants
-| Outil | Format | SISR | SaaS | Business model |
-|---|---|---|---|---|
-| **Docker/BuildKit** | OCI only | zstd:chunked (partial) | ❌ local | Infra existante |
-| **AppImageTool** | AppImage only | zsync delta | ❌ local | Communauté |
-| **Wasmer + WAPM** | WASM only | WASM layer cache | ✅ (Wasmer Edge) | SaaS + OSS |
-| **Nix/Flox/Determinate** | Multiple | Narhash deltas | ✅ (Flox Teams) | SaaS Enterprise |
-| **Bazel remote cache** | Multiple | Remote cache | ❌ local | Google |
-| **pkgforge/soar** | Package manager | zsync deltas | ❌ | OSS |
-| **ocx** | OCI only | Content-addressed | ❌ | OSS |
-| **Afterburner** | WASM | N/A | ✅ planned | WASM runtime |
-| **adipo** | Fat binaries | N/A | ❌ | OSS |
-| **Depot (YC W22)** | OCI only | Layer cache NVMe | ✅ SaaS | $15M+ ARR |
-| **D4C/diffah** | OCI deltas | layer-level deltas | ❌ | OSS |
-| **chunkah** | OCI content layers | N/A | ❌ | OSS |
-
-### Le GAP (rien n'existe)
-**Personne ne fait** : build-once → OCI + AppImage + WASM + SISR cross-format
-
-- Docker/BuildKit → OCI only
-- AppImageTool → AppImage only  
-- Wasmer/WAPM → WASM only
-- Nix → peut faire multi mais complexité Nix lang + pas SISR cross-format
-- D4C/diffah → delta updates OCI only
-- Depot → remote build acceleration, OCI only
-
-### Depot comparison (YC W22, valué $1.5B+)
-**Positionnement** : "40x faster Docker builds" via remote BuildKit VMs (16 CPU, 32GB RAM, NVMe cache)
-
-**Business model** : SaaS subscription
-**Clients** : PostHog, Wistia, Appsmith, Secoda
-**ARR** : $15M+ est.
-
-**xbin vs Depot** :
-| Aspect | Depot | xbin |
-|---|---|---|
-| Probleme | Docker build lent | Deploy multi-format avec updates minces |
-| Solution | Remote BuildKit VMs | OSS tool + multi-format + SISR |
-| Formats | OCI only | OCI + AppImage + WASM + .erebus |
-| Model | SaaS only | OSS tool + SaaS registry |
-| SISR | Layer cache NVMe | Chunk-level delta across formats |
-| Deploy | Cloud/SaaS | Local tool, self-contained |
-
-**Conclusion** : complementaire, pas concurrent. Depot = build fast. xbin = deploy smart.
-
-## 4. Angle MLOps (recherche validee)
-
-### Le probleme
-- Un modele IA fait 5-50 GB
-- Besoin de deployer sur :
-  - Cloud GPU (OCI containers)
-  - Laptop (WASM inference)
-  - Edge device (native binary)
-
-### xbin value proposition
-```bash
-erebus build ./ai-model --to oci,wasm,app --target linux-x64,aarch64
-# → OCI image for cloud, WASM module for browser, native binary for edge
-# → next update: SISR cross-format, ne telecharge que ce qui a change
+[bootloader][slot A: capsule v1][slot B: empty][SUIT manifest][metadata]
 ```
+- Bootloader verifies SUIT manifest → jumps to active slot
+- Update: download patch → write to inactive slot → verify CRC32/SHA256 → atomic slot flip
+- Capsule = fixed-address `predict()` + weights; app calls `predict()` via function pointer
+- No reboot needed for weights-only / operators-only updates
 
-### Concurrent
-- Docker : trop lourd pour edge/WASM
-- AppImage : pas fait pour gros fichiers (50GB)
-- PyInstaller : mono-language, pas de container/WASM
+---
 
-### Business model
-- OSS tool gratis
-- SaaS registry pour versioning de modeles + SISR
-- Target : teams MLOps, ML startups
+## Future Ideas (Could Be Separate Tools)
 
-## 5. Angle Edge/IoT OTA
+### 1. `erebus-registry` — CAS Registry Server
+- **What**: HTTP/CoAP server for layer push/pull, artifact publish
+- **Why**: Share `python3` runtime layer across 100 agents (dedup)
+- **Protocol**: S3-compatible or custom (layer hash = content address)
+- **Auth**: Token-based, integrate with `erebus keygen`/`trust`
 
-### Problem
-- Bandwidth cellulaire $$$ pour fleets
-- Devices heterogenes (ARM/x86/WASM)
-- Updates doivent etre deltas
+### 2. `erebus-fleet` — Fleet Manager / OTA Orchestrator
+- **What**: Central control plane for staged rollout, canary, rollback
+- **Features**:
+  - Device groups, tags, blueprints (like Golioth)
+  - Health telemetry ingestion (inference latency, memory, temp)
+  - Auto-rollback on health gate failure
+  - Freeze/rollback windows per device group
+- **Integration**: `erebus run` health gate → POST to fleet manager
 
-### xbin value proposition
-- SISR cross-format + signatures Ed25519 + single-file
-- Un artefact → tous device types
+### 3. `erebus-sbom` — SBOM Generator
+- **What**: Extract SPDX/CycloneDX from `metadata.layers[]`
+- **Why**: CRA compliance, supply chain transparency
+- **Input**: `erebus inspect --sbom binary.ere` → SPDX JSON
 
-### Concurrent
-- Mender, Foundries.io, Esolutions (embedded Linux OTA)
-- Aucun ne gere WASM + native + container ensemble
+### 4. `erebus-wasm` — WASM Component Support
+- **What**: `ToolLayer` with `command: ["wasmtime", "component.wasm"]`
+- **Why**: Polyglot plugins, sandboxed extensions
+- **Capability**: `Capability::Wasm` → seccomp allow `mmap`/`mprotect` for JIT
 
-### Business model
-- SaaS OTA platform ($0.10/device/mois)
-- Enterprise licensing
+### 5. `erebus-template` — Project Scaffolding
+- **What**: `erebus init --template agent|service|plugin`
+- **Generates**: `erebus.toml` with correct `ArtifactType`, layers, capabilities
+- **Templates**:
+  - `agent`: model + prompt + runtime + tools + caps (Network, Exec)
+  - `service`: multi-entrypoint, health check, config layer
+  - `plugin`: WASM component, no network, read-only rootfs
 
-## 6. Business Models discutes
+### 6. `erebus-bench` — Benchmark Suite
+- **What**: Standardized benchmarks for cold start, inference latency, update size
+- **Targets**: Compare erebus vs Docker vs native vs Ollama on same hardware
+- **CI Integration**: Run on PR, track regressions
 
-### OSS + SaaS (recommande)
-```
-erebus build . -o app.ere     # OSS gratis
-erebus push registry/app:v1   # SaaS registry
-```
+---
 
-### Tiered pricing
-| Tier | Price | Features |
-|---|---|---|
-| Free | $0 | Local build, single-file |
-| Pro | $7/user/mois | Private registry, SISR |
-| Team | $29/team/mois | SSO, collaboration, analytics |
-| Enterprise | Custom | Airgap, compliance, support |
+## Research-Backed Priorities (From Literature)
 
-### Alternative pricing
-- Per-build : $0.01/build (GitHub Actions style)
-- Per-device : $0.10/device/mois (IoT fleet)
+| Priority | Source | Action |
+|----------|--------|--------|
+| **Delta updates mandatory** | RIOT-ML: 99% network savings for weights-only | ✅ SISR done |
+| **A/B partitions / atomic swap** | Minerva, TinyMLDelta, Simms, RIoT | ✅ `AtomicWriter` + rename; MCU needs flash slots |
+| **Health-gated rollback** | Simms, RIoT Secure, Golioth, zed.io | ✅ Health gate in stub; needs fleet integration |
+| **Capability-driven sandbox** | RIoT Secure, CRA, IEC 62443 | ✅ Phase 5b done |
+| **Model fingerprinting** | mallorn: ~10ms version detection | Add to `erebus inspect` |
+| **Tensor-aware diffing** | mallorn (ZipNN), TinyMLDelta | For `erebus-mcu` patches |
+| **Lifecycle as architecture** | RIoT Secure, CRA 2024 | `erebus-fleet` + `erebus-registry` |
 
-## 7. Recommendation finale
+---
 
-### Angle principal : "Bun for polyglot apps"  
-**Positionnement** : xbin = Bun mais pour tout langage. Build n'importe quelle stack, package en single file, run partout.
+## Decision Matrix: When to Build What
 
-### Angle secondaire : MLOps/Edge
-**Valeur differentielle** : SISR cross-format pour gros artefacts (modeles IA 5-50GB)
+| If User Needs... | Build / Use |
+|------------------|-------------|
+| Linux edge gateway, single binary deploy | **erebus** (today) |
+| Bare-metal MCU (Cortex-M, ESP32), TinyML | **Minerva** / **TinyMLDelta** / **Zephyr LLEXT** |
+| Fleet orchestration, staged rollout | **erebus-fleet** (future) / Golioth / Balena |
+| Layer sharing across artifacts | **erebus-registry** (future) |
+| Regulatory SBOM | **erebus-sbom** (future) |
+| WASM plugins | **erebus-wasm** (future) |
 
-### Pitch YC
-> "Erebus is the universal application packager — build once, deploy to containers, laptops, web, and edge as a single self-extracting file. While Docker needs a daemon and Depot only does containers, Erebus packages any runtime into one file that runs anywhere, with 95% smaller updates via SISR."
+---
 
-### Business model gagnant
-- **Produit** : OSS tool (gratis, dev adoption)
-- **Monetisation** : SaaS registry (SISR + signatures + private repos)
-- **Target ARR** : $20M/year
-  - 10K devs pro (Team plan $29) = $3.5M ARR
-  - 100 MLOps/Edge startups = $15M ARR
-  - 5 Enterprise deals (custom $1M) = $5M ARR
+## Open Questions
 
-### Roadmap priorite
-1. **Phase 1** : Completer `--to [oci|appimage|wasm]` (multi-format output)
-2. **Phase 2** : SaaS registry publique (push/pull/sign + SISR)
-3. **Phase 3** : Enterprise features (airgap, compliance, custom runtimes)
+1. **SUIT vs custom manifest** — SUIT is standard but complex; custom is simpler but non-interop.
+2. **Zephyr LLEXT vs custom capsule** — LLEXT is Zephyr-only; capsule is portable but more work.
+3. **Registry protocol** — S3-compatible (ecosystem) vs custom (simpler, content-addressed).
+4. **Health telemetry schema** — Standardize metrics (latency p50/p99, mem, temp, inference success rate).
 
-### Competitive moat
-1. **SISR cross-format** — technologiquement unique
-2. **Single-file self-extracting** — plus simple que Docker
-3. **Multi-runtime** — pas besoin d'installer Python/Node/Go
-4. **Open format** — interoperability (peut decompiler avec tar/unsquashfs)
-```
+---
+
+## Related Projects to Watch
+
+- **Minerva** (github.com/ShishirPatil/minerva) — MCU capsules, EuroSys'26
+- **TinyMLDelta** (github.com/felixgalindo/TinyMLDelta) — Binary patches for TFLite Micro
+- **RIOT-ML** (github.com/TinyPART/RIOT-ML) — SUIT + uTVM + CoAP
+- **mallorn** (github.com/gar-ai/mallorn) — Tensor-aware diffs, GGUF/TFLite/ONNX
+- **Zephyr LLEXT** (antmicro.com/blog/2024/12/...) — Runtime-loadable extensions
+- **Golioth** (blog.golioth.io) — TF Lite OTA via artifacts
+- **ConceptOS** (IEEE IoTJ 2024) — Microkernel component updates with live state transfer
+
+---
+
+*Last updated: 2026-08-20*
+*Based on: RIOT-ML (2024), Minerva (EuroSys'26), TinyMLDelta, mallorn, Zephyr LLEXT, Golioth, RIoT Secure, Simms, CRA 2024, IEC 62443*

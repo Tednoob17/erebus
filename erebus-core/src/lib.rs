@@ -25,6 +25,7 @@ pub mod otel;
 pub mod paths;
 pub mod persistent;
 pub mod pkgmgr;
+pub mod registry;
 pub mod sisr;
 pub mod sisr_header;
 pub mod sisr_stage;

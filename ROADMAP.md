@@ -158,18 +158,20 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 3. **Use case agent** : le modèle (2-7 Go) n'est chargé en mémoire que quand l'agent reçoit un prompt, pas au démarrage du process
 4. **CLI `erebus preload <binary> --layers model,config`** — pré-charger des couches spécifiques
 
-### Phase 4 : Registry CAS (3-4 jours)
+### Phase 4 : Registry CAS ✅ IMPLÉMENTÉ (core) / ⏳ CLI
 
 **Objectif** : Publier/charger des couches via un registre distant.
 
-1. **Créer `Registry`** dans `erebus-core` au-dessus de `ObjectStore`
-   - `pub fn push_layer(&self, layer: &dyn Layer) -> Result<String>` (retourne le hash)
-   - `pub fn pull_layer(&self, hash: &str) -> Result<Box<dyn Layer>>`
-   - `pub fn publish_artifact(&self, artifact: &ArtifactMetadata) -> Result<String>`
-   - Transport : HTTP/HTTPS avec authentification token
-2. **CLI `erebus registry push/pull/list`**
-3. **Intégrer au build** : `erebus build --publish` pousse les couches automatiquement
-4. **Use case agent** : partager le runtime python3 entre plusieurs agents (une seule couche runtime dans le registry, chaque agent référence le hash)
+1. ✅ **`Registry` trait + `MemoryRegistry` + `DiskRegistry`** dans `erebus-core/src/registry.rs`
+   - `push_layer(hash, data) -> String` — upload layer blob, vérifie hash
+   - `pull_layer(hash) -> Option<Vec<u8>>` — download layer by content hash
+   - `publish_artifact(ArtifactRecord)` — register artifact metadata
+   - `inspect_artifact(hash)` — fetch artifact metadata
+   - `list_layers()` / `list_artifacts()` — list available content
+   - Transport : HTTP/HTTPS (`HttpRegistryClient` dans `erebus-cli/src/commands/registry.rs` avec `reqwest` blocking)
+2. ✅ **CLI `erebus registry push/pull/list`** — `push-layer`, `pull-layer`, `list-layers`, `publish-artifact`, `inspect-artifact`, `list-artifacts`
+3. ⏳ **Intégrer au build** : `erebus build --publish` non implémenté (reste manuel via `erebus registry publish-artifact`)
+4. ⏳ **Use case de partage de runtime** : nécessite `erebus-registry` serveur (futur)
 
 ### Phase 5a : Security audit + enforcement de base ✅ FAIT
 
@@ -225,11 +227,11 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 
 1. ✅ **Phase 1** (stub → couches) — **FAIT**. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `effective_runtime()`, `capabilities()`, `resolve_entrypoint()` consommés par le stub. Extraction monolithique (rootfs complet), mais la spécification dit que l'extraction lazy/différée est Phase 3. Le trait `Entrypoint` du core n'est pas utilisé par le stub — c'est délibéré (stub a du `unsafe` `execvp` que le core ne peut pas contenir ; le trait sert la validation des layers).
 2. ✅ **Phase 2** (hot-swap) — Terminé. `erebus swap` command avec SISR delta
-3. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
-4. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
-5. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
-6. **Phase 3** (lazy loading) — Performance agent IA, mmap/FUSE, ne pas charger 7 Go au démarrage
-7. **Phase 4** (registry CAS) — Adoption, partager couches entre artefacts
+3. ✅ **Phase 4** (registry CAS) — Terminé. `Registry` trait + `MemoryRegistry` + `DiskRegistry` dans core, CLI `erebus registry` (push/pull/list/inspect), HTTP transport (`HttpRegistryClient`)
+4. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
+5. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
+6. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
+7. **Phase 3** (lazy loading) — Performance agent IA, mmap/FUSE, ne pas charger 7 Go au démarrage
 
 ---
 

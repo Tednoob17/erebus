@@ -99,6 +99,14 @@ enum Commands {
     /// Publish a .erebus file to a registry
     Publish(commands::publish::PublishArgs),
 
+    /// Content-addressable registry operations (push/pull layers, publish artifacts)
+    ///
+    /// Examples:
+    ///   erebus registry --registry `<https://registry.example.com/v1>` push-layer -f layer.tar
+    ///   erebus registry --registry `<https://registry.example.com/v1>` list-layers
+    ///   erebus registry --registry `<https://registry.example.com/v1>` publish-artifact -f app.erebus
+    Registry(commands::registry::RegistryArgs),
+
     /// Show erebus environment info
     Env(commands::env::EnvArgs),
 
@@ -196,6 +204,7 @@ fn main() -> ExitCode {
             commands::swap::run(args, effective_verbose)
         }
         Commands::Publish(args) => commands::publish::run(args),
+        Commands::Registry(args) => commands::registry::run(args),
         Commands::Env(args) => commands::env::run(args),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();

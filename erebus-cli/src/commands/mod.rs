@@ -6,6 +6,7 @@ pub mod env;
 pub mod inspect;
 pub mod keygen;
 pub mod publish;
+pub mod registry;
 pub mod run;
 pub mod scan;
 pub mod selftest;
