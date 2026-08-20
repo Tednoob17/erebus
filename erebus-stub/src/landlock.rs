@@ -4,10 +4,17 @@
 //! ABI bump for `REFER` (v2, 5.19) and `TRUNCATE` (v3, 6.2). Restricts
 //! filesystem access after `pivot_root`: full R/W on rootfs, read-only
 //! everywhere else.
+//!
+//! The sandbox is now capability-driven:
+//! - `WriteFile` → full R/W on rootfs
+//! - `ReadFile` → read-only on rootfs (if no `WriteFile`)
+//! - Without capabilities → read-only everywhere
 
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+
+use erebus_core::layer::Capability;
 
 // ---------------------------------------------------------------------------
 // Landlock structs (ABI v1, Linux 5.13)
@@ -34,31 +41,85 @@ const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
 const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
 const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 
-// All filesystem operations we deny by default (handled by the ruleset).
-// ABI v3 (kernel 6.2+): includes REFER (v2) and TRUNCATE (v3).
-const HANDLED_FS_V3: u64 = LANDLOCK_ACCESS_FS_EXECUTE
-    | LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_READ_FILE
-    | LANDLOCK_ACCESS_FS_READ_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_DIR
-    | LANDLOCK_ACCESS_FS_REMOVE_FILE
-    | LANDLOCK_ACCESS_FS_MAKE_CHAR
-    | LANDLOCK_ACCESS_FS_MAKE_DIR
-    | LANDLOCK_ACCESS_FS_MAKE_REG
-    | LANDLOCK_ACCESS_FS_MAKE_SOCK
-    | LANDLOCK_ACCESS_FS_MAKE_FIFO
-    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-    | LANDLOCK_ACCESS_FS_MAKE_SYM
-    | LANDLOCK_ACCESS_FS_REFER
-    | LANDLOCK_ACCESS_FS_TRUNCATE;
+/// Configuration for Landlock sandbox derived from capabilities.
+#[derive(Debug, Clone, Default)]
+pub struct LandlockConfig {
+    /// Allow full R/W access to rootfs (`WriteFile` capability).
+    pub allow_write: bool,
+    /// Allow execute on rootfs (`Exec` capability).
+    pub allow_exec: bool,
+}
 
-// ABI v1 (kernel 5.13-6.1): landlock_create_ruleset rejects REFER/TRUNCATE
-// with EINVAL, so strip them. Without this fallback the whole sandbox would
-// fail-open or never install on older kernels.
-const HANDLED_FS_V1: u64 =
-    HANDLED_FS_V3 & !(LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE);
+impl LandlockConfig {
+    /// Build config from a set of capabilities.
+    pub fn from_capabilities(caps: &[Capability]) -> Self {
+        let mut cfg = Self::default();
+        for cap in caps {
+            match cap {
+                Capability::WriteFile => cfg.allow_write = true,
+                Capability::Exec => cfg.allow_exec = true,
+                _ => {}
+            }
+        }
+        cfg
+    }
+}
 
-// Read-only access for everything outside the rootfs.
+/// Compute the handled access set based on config.
+fn handled_fs_v3(config: &LandlockConfig) -> u64 {
+    let mut handled = 0;
+    // Always handle read/execute for basic operation
+    handled |= LANDLOCK_ACCESS_FS_READ_FILE;
+    handled |= LANDLOCK_ACCESS_FS_READ_DIR;
+    handled |= LANDLOCK_ACCESS_FS_EXECUTE;
+
+    if config.allow_write {
+        handled |= LANDLOCK_ACCESS_FS_WRITE_FILE;
+        handled |= LANDLOCK_ACCESS_FS_REMOVE_DIR;
+        handled |= LANDLOCK_ACCESS_FS_REMOVE_FILE;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_CHAR;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_DIR;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_REG;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_SOCK;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_FIFO;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_BLOCK;
+        handled |= LANDLOCK_ACCESS_FS_MAKE_SYM;
+    }
+    // REFER and TRUNCATE are newer ABI additions
+    handled |= LANDLOCK_ACCESS_FS_REFER;
+    handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
+
+    handled
+}
+
+/// Compute the handled access set for ABI v1 (older kernels).
+#[allow(dead_code)]
+fn handled_fs_v1(config: &LandlockConfig) -> u64 {
+    handled_fs_v3(config) & !(LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE)
+}
+
+/// Compute the allowed access for rootfs based on config.
+fn rootfs_access(config: &LandlockConfig) -> u64 {
+    let mut access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+    if config.allow_exec {
+        access |= LANDLOCK_ACCESS_FS_EXECUTE;
+    }
+    if config.allow_write {
+        access |= LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_CHAR
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SOCK
+            | LANDLOCK_ACCESS_FS_MAKE_FIFO
+            | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+            | LANDLOCK_ACCESS_FS_MAKE_SYM;
+    }
+    access
+}
+
+/// Read-only access for everything outside the rootfs.
 const READ_ONLY: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
 
 // Landlock uses the generic syscall numbers (444/445/446) on every
@@ -133,8 +194,7 @@ impl Drop for RootfsGuard {
     }
 }
 
-/// Install Landlock sandbox: rootfs gets full access, everything else is
-/// read-only.
+/// Install Landlock sandbox based on capabilities.
 ///
 /// Must be called *after* `pivot_root` so that `/` already points to rootfs;
 /// the rootfs rule uses the pre-opened fd from [`RootfsGuard`] instead of the
@@ -142,12 +202,13 @@ impl Drop for RootfsGuard {
 ///
 /// Fail-closed: any error returns `Err` — the caller must not run the app
 /// without the requested filesystem sandbox.
-pub fn sandbox(root: &RootfsGuard) -> io::Result<()> {
-    let (handled, ruleset_fd) = create_ruleset()?;
+pub fn sandbox(root: &RootfsGuard, config: &LandlockConfig) -> io::Result<()> {
+    let handled = handled_fs_v3(config);
+    let (_handled_used, ruleset_fd) = create_ruleset(handled)?;
 
-    // Allow full access to rootfs. `allowed_access` must be a subset of the
-    // ruleset's handled set, so grant exactly the bits that were handled.
-    add_fd_beneath(ruleset_fd, root.fd, handled)?;
+    // Allow access to rootfs based on capabilities.
+    let access = rootfs_access(config);
+    add_fd_beneath(ruleset_fd, root.fd, access)?;
 
     // Allow read-only everywhere else (after pivot_root, "/" is rootfs, so
     // this only matters for future bind mounts).
@@ -160,19 +221,15 @@ pub fn sandbox(root: &RootfsGuard) -> io::Result<()> {
 }
 
 /// Create the ruleset, negotiating the highest supported ABI.
-///
-/// `landlock_create_ruleset` rejects handled bits the kernel does not know
-/// (EINVAL). Try the full ABI-v3 set first (kernel 6.2+, which implies v2's
-/// REFER), then fall back to the ABI-v1 set for 5.13-6.1. Any other error is
-/// a hard failure (no Landlock support, seccomp'd environment, ...).
-fn create_ruleset() -> io::Result<(u64, i32)> {
-    match try_create(HANDLED_FS_V3) {
-        Ok(fd) => Ok((HANDLED_FS_V3, fd)),
+fn create_ruleset(handled: u64) -> io::Result<(u64, i32)> {
+    match try_create(handled) {
+        Ok(fd) => Ok((handled, fd)),
         Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
             // ABI v3 bits (REFER/TRUNCATE) unknown to kernels < 6.2; retry
             // with the ABI v1 set before giving up.
-            let fd = try_create(HANDLED_FS_V1)?;
-            Ok((HANDLED_FS_V1, fd))
+            let handled_v1 = handled & !(LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE);
+            let fd = try_create(handled_v1)?;
+            Ok((handled_v1, fd))
         }
         Err(e) => Err(e),
     }

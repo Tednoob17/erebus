@@ -43,7 +43,7 @@ pub fn resolve_arch(target_arch: Option<&str>) -> u8 {
 }
 
 /// Build the metadata JSON bytes.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub fn build_meta_json(
     name: &str,
     runtime: &str,
@@ -166,10 +166,21 @@ pub fn build_meta_json(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     meta["entrypoint_layer"] = serde_json::Value::String(entrypoint_layer_name);
 
+    // Emit artifact_type (defaults to "application" for backward compat)
+    meta["artifact_type"] = serde_json::Value::String(options.artifact_type.to_string());
+
+    // Emit multi-agent entrypoints if present
+    if !options.entrypoints.is_empty() || options.multi_agent {
+        meta["entrypoints"] = serde_json::to_value(&options.entrypoints)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        meta["multi_agent"] = serde_json::Value::Bool(options.multi_agent);
+    }
+
     serde_json::to_vec(&meta).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Options for metadata construction.
+#[allow(clippy::struct_excessive_bools)]
 pub struct MetaOptions {
     pub version: Option<String>,
     pub author: Option<String>,
@@ -193,6 +204,12 @@ pub struct MetaOptions {
     /// Name of the entrypoint layer. Defaults to the runtime name when `layers`
     /// is `None`.
     pub entrypoint_layer: Option<String>,
+    /// Artifact type template (application, agent, service, plugin).
+    pub artifact_type: crate::metadata::ArtifactType,
+    /// Named entrypoints for multi-agent artifacts.
+    pub entrypoints: std::collections::BTreeMap<String, Vec<String>>,
+    /// Enable multi-agent mode (argv[1] selects agent from entrypoints).
+    pub multi_agent: bool,
 }
 
 /// Input to [`assemble_erebus`]: bundles every byte-slice and build flag that
@@ -546,6 +563,9 @@ mod tests {
             crypto: None,
             layers: None,
             entrypoint_layer: None,
+            artifact_type: crate::metadata::ArtifactType::Application,
+            entrypoints: std::collections::BTreeMap::new(),
+            multi_agent: false,
         };
         let bun_features = BunFeatures::default();
         let json = build_meta_json(

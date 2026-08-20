@@ -17,6 +17,34 @@ use super::sign::sign_macos_binary;
 use super::sisr::{build_sisr_config, report_sisr_bandwidth};
 use super::stub::{find_stub, read_existing_hashes};
 
+/// Parse the `--artifact-type` string into an `ArtifactType` enum.
+pub(crate) fn parse_artifact_type(s: &str) -> Result<erebus_core::metadata::ArtifactType, String> {
+    match s {
+        "application" => Ok(erebus_core::metadata::ArtifactType::Application),
+        "agent" => Ok(erebus_core::metadata::ArtifactType::Agent),
+        "service" => Ok(erebus_core::metadata::ArtifactType::Service),
+        "plugin" => Ok(erebus_core::metadata::ArtifactType::Plugin),
+        other => Err(format!(
+            "invalid artifact type '{other}' — valid: application, agent, service, plugin"
+        )),
+    }
+}
+
+/// Parse `--entrypoint name=argv0,arg1,arg2` into a `BTreeMap<String, Vec<String>>`.
+pub(crate) fn parse_agent_entrypoints(
+    entries: &[String],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut map = std::collections::BTreeMap::new();
+    for entry in entries {
+        if let Some(eq) = entry.find('=') {
+            let name = entry[..eq].to_string();
+            let args: Vec<String> = entry[eq + 1..].split(',').map(String::from).collect();
+            map.insert(name, args);
+        }
+    }
+    map
+}
+
 /// Warn when `--seccomp`/`--landlock` are requested but the stub will not
 /// enforce them (they only apply at isolation >= 2, on the `pivot_root` path).
 pub(crate) fn warn_sandbox_noops(isolation_num: u32, seccomp: bool, landlock: bool) {
@@ -790,6 +818,10 @@ pub(crate) fn build_single_target(
             crypto: crypto_meta,
             layers: None,
             entrypoint_layer: None,
+            artifact_type: parse_artifact_type(&args.artifact_type)
+                .map_err(|e| anyhow::anyhow!(e))?,
+            entrypoints: parse_agent_entrypoints(&args.agent_entrypoints),
+            multi_agent: !args.agent_entrypoints.is_empty(),
         },
         &bun_features,
     )?;

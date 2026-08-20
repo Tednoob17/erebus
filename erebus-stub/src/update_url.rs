@@ -101,6 +101,9 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_type: String::new(),
+                entrypoints: std::collections::BTreeMap::new(),
+                multi_agent: false,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
@@ -132,6 +135,9 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_type: String::new(),
+                entrypoints: std::collections::BTreeMap::new(),
+                multi_agent: false,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
@@ -161,6 +167,9 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_type: String::new(),
+                entrypoints: std::collections::BTreeMap::new(),
+                multi_agent: false,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
@@ -190,6 +199,9 @@ mod tests {
                 update_url: None,
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_type: String::new(),
+                entrypoints: std::collections::BTreeMap::new(),
+                multi_agent: false,
             }
         };
         let err = resolve_update_url(&args, 0, &meta).unwrap_err();
@@ -219,6 +231,9 @@ mod tests {
                 update_url: Some("https://meta.example/app".into()),
                 layers: Vec::new(),
                 entrypoint_layer: None,
+                artifact_type: String::new(),
+                entrypoints: std::collections::BTreeMap::new(),
+                multi_agent: false,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();

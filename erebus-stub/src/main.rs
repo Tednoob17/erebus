@@ -101,6 +101,7 @@ const BIN_PATHS: &[&str] = &["usr/bin", "bin", "usr/local/bin"];
 const BIN_PATHS_ABS: &[&str] = &["/usr/bin", "/bin", "/usr/local/bin"];
 
 #[derive(Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Metadata {
     name: String,
     #[serde(default)]
@@ -144,6 +145,16 @@ pub struct Metadata {
     /// Name of the layer containing the main entrypoint.
     #[serde(default)]
     entrypoint_layer: Option<String>,
+    /// Artifact type template (application, agent, service, plugin).
+    #[serde(default)]
+    #[allow(dead_code)]
+    artifact_type: String,
+    /// Multiple named entrypoints (multi-agent support).
+    #[serde(default)]
+    entrypoints: std::collections::BTreeMap<String, Vec<String>>,
+    /// If true, argv[1] selects agent from `entrypoints`.
+    #[serde(default)]
+    multi_agent: bool,
 }
 
 impl Metadata {
@@ -176,6 +187,40 @@ impl Metadata {
             }
         }
         &self.runtime
+    }
+
+    /// Returns all capabilities declared by the artifact's layers.
+    /// Used to build capability-driven seccomp/Landlock filters.
+    pub fn capabilities(&self) -> Vec<erebus_core::layer::Capability> {
+        let mut caps = Vec::new();
+        for layer in &self.layers {
+            if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
+                caps.extend(rt.capabilities.clone());
+            }
+        }
+        // Deduplicate
+        caps.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+        caps.dedup();
+        caps
+    }
+
+    /// Returns all named entrypoint names (for multi-agent artifacts).
+    pub fn entrypoint_names(&self) -> Vec<&str> {
+        self.entrypoints.keys().map(String::as_str).collect()
+    }
+
+    /// Selects an entrypoint by name for multi-agent artifacts.
+    pub fn select_entrypoint(&self, name: &str) -> Option<Vec<String>> {
+        if self.multi_agent {
+            self.entrypoints.get(name).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Checks if this artifact uses the multi-agent pattern.
+    pub fn is_multi_agent_artifact(&self) -> bool {
+        self.multi_agent
     }
 }
 
@@ -260,6 +305,67 @@ fn run() -> io::Result<()> {
     // forwarded.
     handle_runtime_flags(&meta)?;
 
+    // Multi-agent entrypoint selection: if this is a multi-agent artifact,
+    // select the agent entrypoint from argv[1] or --erebus-agent=<name>.
+    if meta.is_multi_agent_artifact() {
+        let agent_name_opt = select_agent_from_args();
+        let agent_name_str = agent_name_opt.as_deref();
+        let selected = agent_name_str
+            .and_then(|n| meta.select_entrypoint(n))
+            .or_else(|| {
+                std::env::args()
+                    .nth(1)
+                    .and_then(|a| meta.select_entrypoint(&a))
+            });
+
+        match selected {
+            None if agent_name_opt.is_none() => {
+                let names = meta.entrypoint_names();
+                if names.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "multi-agent artifact has no entrypoints defined in metadata",
+                    ));
+                }
+                eprintln!("[erebus] available agents: {}", names.join(", "));
+                eprintln!("[erebus] usage: {} <agent-name> [args...]", meta.name);
+                eprintln!(
+                    "[erebus]    or: {} --erebus-agent <agent-name> [args...]",
+                    meta.name
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no agent specified — pass an agent name as argv[1] or use --erebus-agent",
+                ));
+            }
+            None => {
+                eprintln!(
+                    "[erebus] agent '{}' not found — available: {}",
+                    agent_name_opt.as_deref().unwrap_or_default(),
+                    meta.entrypoint_names().join(", ")
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "agent not found",
+                ));
+            }
+            Some(entry) => {
+                if verbose {
+                    eprintln!(
+                        "[erebus] multi-agent: selected '{}'",
+                        agent_name_opt.as_deref().unwrap_or_default()
+                    );
+                }
+                meta.entrypoint = entry;
+                meta.entrypoint_layer = None;
+                std::env::set_var("ERE_AGENT_SELECTED", "1");
+                if let Some(ref name) = agent_name_opt {
+                    std::env::set_var("ERE_AGENT_NAME", name);
+                }
+            }
+        }
+    }
+
     // Canonical on-disk path — the file the update engine swaps in place.
     // Kept separate from the running image path because the kernel can pin
     // the pre-swap inode of the running image after a rename.
@@ -267,15 +373,20 @@ fn run() -> io::Result<()> {
 
     // SISR self-update: rebuild the binary in place from a signed delta before
     // reading the payload, so this run executes the new version.
-    if let Some(updated) = maybe_apply_sisr_update()? {
-        if verbose {
-            eprintln!("[erebus] SISR update applied: {}", updated.display());
+    // `--no-sisr` bypasses SISR entirely, falling back to classic extraction.
+    if std::env::var_os("ERE_NO_SISR").is_none() {
+        if let Some(updated) = maybe_apply_sisr_update()? {
+            if verbose {
+                eprintln!("[erebus] SISR update applied: {}", updated.display());
+            }
+            // Re-open the *canonical real path*, not /proc/self/exe: the kernel can
+            // pin the running image's inode, so /proc/self/exe may still resolve to
+            // the pre-update file after the rename.
+            bin_path = updated;
+            (exe, footer, meta_bytes, meta) = read_from(&bin_path)?;
         }
-        // Re-open the *canonical real path*, not /proc/self/exe: the kernel can
-        // pin the running image's inode, so /proc/self/exe may still resolve to
-        // the pre-update file after the rename.
-        bin_path = updated;
-        (exe, footer, meta_bytes, meta) = read_from(&bin_path)?;
+    } else if verbose {
+        eprintln!("[erebus] --no-sisr: skipping SISR update, using classic extraction");
     }
 
     // 2. Compute cache key and check hit BEFORE reading the payload.
@@ -321,9 +432,15 @@ fn run() -> io::Result<()> {
         return Err(err("inconsistent signature state (flag/offset mismatch)"));
     }
     if has_sig_block {
-        crypto::verify_ed25519(&footer, &mut exe, &payload, &meta_bytes)?;
-        if verbose {
-            eprintln!("[erebus] Ed25519 signature verified");
+        if std::env::var_os("ERE_NO_SIGN").is_some() {
+            if verbose {
+                eprintln!("[erebus] --no-sign: skipping Ed25519 signature verification");
+            }
+        } else {
+            crypto::verify_ed25519(&footer, &mut exe, &payload, &meta_bytes)?;
+            if verbose {
+                eprintln!("[erebus] Ed25519 signature verified");
+            }
         }
     } else if footer.format_version < 3 && !footer.has_sisr() {
         reject_downgraded_sig_block(&mut exe, &footer)?;
@@ -828,6 +945,29 @@ fn exec_again(bin_path: &Path) -> io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-agent entrypoint selection
+// ---------------------------------------------------------------------------
+
+/// Parses `--erebus-agent <name>` or `--erebus-agent=<name>` from argv.
+/// Returns the agent name if found, else `None`.
+fn select_agent_from_args() -> Option<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--erebus-agent" {
+            if i + 1 < args.len() {
+                return Some(args[i + 1].clone());
+            }
+        } else if let Some(rest) = arg.strip_prefix("--erebus-agent=") {
+            return Some(rest.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // `--erebus-update` / `--erebus-version` runtime flags
 // ---------------------------------------------------------------------------
 
@@ -838,11 +978,24 @@ fn exec_again(bin_path: &Path) -> io::Result<()> {
 ///   chunks from the update channel, applies the delta atomically, prints
 ///   reuse/fetch statistics on stderr, and exits 0. A bare `--erebus-update`
 ///   falls back to `$ERE_UPDATE_URL` then the embedded metadata URL.
+/// - `--no-sisr` disables SISR self-update (forces classic extraction).
+/// - `--no-sign` bypasses Ed25519 signature verification (dev only).
 ///
-/// Because both paths call `process::exit`, these flags never reach the host
-/// app's `argv`. When neither flag is present this is a no-op.
+/// Because `--erebus-version` and `--erebus-update` call `process::exit`,
+/// these flags never reach the host app's `argv`. `--no-sisr` and `--no-sign`
+/// set environment variables that the extraction/SISR paths check.
 fn handle_runtime_flags(meta: &Metadata) -> io::Result<()> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+
+    // Feature flags: set environment variables for downstream code to check
+    for arg in &args {
+        let s = arg.to_string_lossy();
+        if s == "--no-sisr" {
+            std::env::set_var("ERE_NO_SISR", "1");
+        } else if s == "--no-sign" {
+            std::env::set_var("ERE_NO_SIGN", "1");
+        }
+    }
 
     if args.iter().any(|a| a == "--erebus-version") {
         println!("erebus {} (stub)", env!("CARGO_PKG_VERSION"));

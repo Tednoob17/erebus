@@ -466,6 +466,16 @@ pub struct BuildArgs {
     /// 16 MiB for efficient SISR delta updates on multi-GB model payloads.
     #[arg(long)]
     pub embed_model: Option<PathBuf>,
+
+    /// Artifact type template: application, agent, service, plugin
+    /// (default: application — single entrypoint)
+    #[arg(long, default_value = "application")]
+    pub artifact_type: String,
+
+    /// Named entrypoint for multi-agent artifacts (repeatable): --entrypoint chat=chat.py
+    /// When used, sets `multi_agent: true` and populates the entrypoints map
+    #[arg(long = "entrypoint", action = clap::ArgAction::Append)]
+    pub agent_entrypoints: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -729,6 +739,8 @@ mod tests {
             json: false,
             quiet: false,
             embed_model: None,
+            artifact_type: "application".into(),
+            agent_entrypoints: Vec::new(),
         }
     }
 

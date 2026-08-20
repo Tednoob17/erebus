@@ -6,7 +6,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::layer::{LayerKind, SerializableLayer};
 
+/// Artifact type template — controls entrypoint resolution and runtime behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ArtifactType {
+    #[default]
+    #[serde(rename = "application")]
+    Application,
+    #[serde(rename = "agent")]
+    Agent,
+    #[serde(rename = "service")]
+    Service,
+    #[serde(rename = "plugin")]
+    Plugin,
+}
+
+impl std::fmt::Display for ArtifactType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Application => write!(f, "application"),
+            Self::Agent => write!(f, "agent"),
+            Self::Service => write!(f, "service"),
+            Self::Plugin => write!(f, "plugin"),
+        }
+    }
+}
+
 /// Metadata for the entire artifact (new format with layers).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArtifactMetadata {
     /// Application name.
@@ -15,18 +41,28 @@ pub struct ArtifactMetadata {
     pub erebus_version: String,
     /// Creation timestamp (RFC3339).
     pub created: String,
+    /// Artifact type template — controls entrypoint resolution and runtime behavior.
+    #[serde(default)]
+    pub artifact_type: ArtifactType,
     /// Layers that compose this artifact.
     #[serde(default)]
     pub layers: Vec<SerializableLayer>,
     /// Name of the layer that contains the main entrypoint.
     #[serde(default)]
     pub entrypoint_layer: Option<String>,
+    /// Multiple named entrypoints (multi-agent support).
+    /// Keyed by agent name; the stub selects via `argv[1]` or `--erebus-agent <name>`.
+    #[serde(default)]
+    pub entrypoints: std::collections::BTreeMap<String, Vec<String>>,
     /// Fallback runtime (for backward compatibility).
     #[serde(default)]
     pub runtime: String,
     /// Fallback entrypoint (for backward compatibility).
     #[serde(default)]
     pub entrypoint: Vec<String>,
+    /// If true, the stub reads `argv[1]` as the agent name from `entrypoints`.
+    #[serde(default)]
+    pub multi_agent: bool,
     /// Environment variables.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
@@ -89,6 +125,26 @@ impl ArtifactMetadata {
         self.entrypoint_layer
             .as_ref()
             .and_then(|name| self.layers.iter().find(|l| l.name() == name))
+    }
+
+    /// For multi-agent artifacts: select an entrypoint by name.
+    /// Returns a clone of the selected argv, or `None` if not found.
+    pub fn select_entrypoint(&self, name: &str) -> Option<Vec<String>> {
+        if self.multi_agent {
+            self.entrypoints.get(name).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Get all named entrypoints (for multi-agent).
+    pub fn entrypoint_names(&self) -> Vec<&str> {
+        self.entrypoints.keys().map(String::as_str).collect()
+    }
+
+    /// Check if this artifact uses the multi-agent pattern.
+    pub fn is_multi_agent(&self) -> bool {
+        self.multi_agent
     }
 
     /// Get all layers of a specific kind.
@@ -419,5 +475,38 @@ mod tests {
         assert_eq!(parsed.name, metadata.name);
         assert_eq!(parsed.layers.len(), 1);
         assert_eq!(parsed.entrypoint_layer, metadata.entrypoint_layer);
+    }
+
+    #[test]
+    fn multi_agent_metadata_serializes() {
+        let mut entrypoints = std::collections::BTreeMap::new();
+        entrypoints.insert(
+            "chat".to_string(),
+            vec!["python3".to_string(), "/app/chat.py".to_string()],
+        );
+        entrypoints.insert(
+            "code".to_string(),
+            vec!["python3".to_string(), "/app/code.py".to_string()],
+        );
+
+        let metadata = ArtifactMetadata {
+            name: "multi-agent".into(),
+            erebus_version: "0.5.0".into(),
+            created: "2024-01-01T00:00:00Z".into(),
+            artifact_type: ArtifactType::Agent,
+            entrypoints,
+            multi_agent: true,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: ArtifactMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.artifact_type, ArtifactType::Agent);
+        assert!(parsed.multi_agent);
+        assert_eq!(parsed.entrypoint_names(), vec!["chat", "code"]);
+        let chat = parsed.select_entrypoint("chat").unwrap();
+        assert_eq!(chat[0], "python3");
+        assert_eq!(chat[1], "/app/chat.py");
     }
 }

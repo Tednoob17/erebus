@@ -247,6 +247,9 @@ fn test_inspect_reports_encrypted_v4() {
             crypto: Some(crypto_value),
             layers: None,
             entrypoint_layer: None,
+            artifact_type: erebus_core::metadata::ArtifactType::Application,
+            entrypoints: std::collections::BTreeMap::new(),
+            multi_agent: false,
         },
         &BunFeatures::default(),
     )

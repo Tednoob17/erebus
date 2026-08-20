@@ -602,15 +602,26 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
 
     crate::pivot_root_into(rootfs)?;
     if meta.seccomp {
-        crate::seccomp::install_seccomp_denylist().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("seccomp unavailable, refusing to run without syscall filter: {e}"),
-            )
-        })?;
+        let caps = meta.capabilities();
+        let config = crate::seccomp::SeccompConfig::from_capabilities(&caps);
+        if let Err(e) = crate::seccomp::install_seccomp_filter(&config) {
+            if e.raw_os_error() == Some(libc::ENOSYS) {
+                eprintln!(
+                    "[erebus] warning: seccomp unavailable on this kernel ({e}) — \
+                     continuing without syscall filter"
+                );
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("seccomp unavailable, refusing to run without syscall filter: {e}"),
+                ));
+            }
+        }
     }
     if let Some(root) = root_guard {
-        crate::landlock::sandbox(&root).map_err(|e| {
+        let caps = meta.capabilities();
+        let config = crate::landlock::LandlockConfig::from_capabilities(&caps);
+        crate::landlock::sandbox(&root, &config).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
                 format!("landlock unavailable, refusing to run without filesystem sandbox: {e}"),
@@ -635,7 +646,7 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
     #[cfg(unix)]
     let orig_cwd = std::env::current_dir().ok();
     #[cfg(target_os = "linux")]
-    let use_pivot = meta.isolation >= 2;
+    let mut use_pivot = meta.isolation >= 2;
     #[cfg(all(unix, not(target_os = "linux")))]
     let use_pivot = false;
 
@@ -665,7 +676,17 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
     enter_namespace_if_needed(meta.isolation)?;
     #[cfg(target_os = "linux")]
     if use_pivot {
-        enter_pivot_sandbox(rootfs, meta)?;
+        if let Err(e) = enter_pivot_sandbox(rootfs, meta) {
+            if e.raw_os_error() == Some(libc::EPERM) || e.raw_os_error() == Some(libc::EINVAL) {
+                eprintln!(
+                    "[erebus] warning: pivot_root failed ({e}) — \
+                     falling back to bind-mount-only extraction (no namespace isolation)"
+                );
+                use_pivot = false;
+            } else {
+                return Err(e);
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -733,7 +754,31 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
                 }
             }
         }
+        let agent_selected = std::env::var_os("ERE_AGENT_SELECTED").is_some();
+        let agent_name =
+            std::env::var_os("ERE_AGENT_NAME").map(|s| s.to_string_lossy().into_owned());
+        let mut skip_next_val = false;
         for a in std::env::args_os().skip(1) {
+            if agent_selected {
+                let s = a.to_string_lossy().into_owned();
+                if s == "--erebus-agent" {
+                    skip_next_val = true;
+                    continue;
+                }
+                if s.starts_with("--erebus-agent=") {
+                    continue;
+                }
+                if skip_next_val {
+                    skip_next_val = false;
+                    continue;
+                }
+                // For positional agent name: skip if it matches the selected agent name
+                if let Some(ref name) = agent_name {
+                    if &s == name {
+                        continue;
+                    }
+                }
+            }
             argv.push(cstr(a.as_bytes())?);
         }
 
@@ -1412,6 +1457,9 @@ mod tests {
             update_url: None,
             layers: Vec::new(),
             entrypoint_layer: None,
+            artifact_type: String::new(),
+            entrypoints: std::collections::BTreeMap::new(),
+            multi_agent: false,
         };
 
         let app_config = AppConfig {
@@ -1561,6 +1609,9 @@ mod tests {
             update_url: None,
             layers: Vec::new(),
             entrypoint_layer: None,
+            artifact_type: String::new(),
+            entrypoints: std::collections::BTreeMap::new(),
+            multi_agent: false,
         };
         let err = resolve_entrypoint(&meta, tmp.path(), false).unwrap_err();
         assert!(err.to_string().contains("unsupported runtime 'cobol'"));
