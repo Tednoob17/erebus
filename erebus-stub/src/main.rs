@@ -152,9 +152,11 @@ impl Metadata {
     /// `entrypoint` field for legacy binaries.
     pub fn effective_entrypoint(&self) -> &[String] {
         if let Some(layer_name) = &self.entrypoint_layer {
-            if let Some(layer) = self.layers.iter().find(|l| l.name() == layer_name) {
-                if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
-                    return &rt.entrypoint;
+            for layer in &self.layers {
+                if layer.name() == layer_name {
+                    if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
+                        return &rt.entrypoint;
+                    }
                 }
             }
         }
@@ -165,9 +167,11 @@ impl Metadata {
     /// `entrypoint_layer` is set, falling back to the flat `runtime` field.
     pub fn effective_runtime(&self) -> &str {
         if let Some(layer_name) = &self.entrypoint_layer {
-            if let Some(layer) = self.layers.iter().find(|l| l.name() == layer_name) {
-                if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
-                    return &rt.name;
+            for layer in &self.layers {
+                if layer.name() == layer_name {
+                    if let erebus_core::layer::SerializableLayer::Runtime(rt) = layer {
+                        return &rt.name;
+                    }
                 }
             }
         }
@@ -240,12 +244,12 @@ fn run() -> io::Result<()> {
     // Reject crafted metadata with an unknown runtime before doing any
     // extraction/update work (roadmap #40 — unknown runtime used to silently
     // map to bash).
-    if detect::Runtime::from_name(&meta.runtime).is_none() {
+    if detect::Runtime::from_name(meta.effective_runtime()).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "unsupported runtime '{}' in metadata — supported: python, deno, node, electron, java, ruby, dotnet, go, php, perl, hugo, wasm, binary",
-                meta.runtime
+                meta.effective_runtime()
             ),
         ));
     }

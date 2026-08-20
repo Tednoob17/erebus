@@ -1,0 +1,9 @@
+model,quantization,model_size_mb,payload_size_mb,chunk_target_mb,total_chunks,reused_chunks,fetched_chunks,full_download_mb,delta_download_mb,bandwidth_saved_pct
+Qwen3-0.6B,IQ1_S→patched,204.2,201.7,0.0625,1630,1621,9,201.7,0.0,99.4
+Qwen3-0.6B,IQ1_S+code(v1→v2),204.7,217.3,16.0,10,9,1,217.3,21.7,90.0
+Qwen3-0.6B,UD-IQ1_S→UD-IQ2_XXS,223.2,220.3,16.0,6,0,6,220.3,220.3,0.0
+Qwen3-0.6B,UD-IQ1_S→IQ4_XS,350.8,345.1,16.0,12,0,12,345.1,345.1,0.0
+Qwen3-0.6B,UD-IQ1_S→IQ4_NL,363.9,357.2,16.0,15,0,15,357.2,357.2,0.0
+Qwen3-0.6B,UD-IQ2_XXS→IQ4_XS,350.8,345.1,16.0,12,0,12,345.1,345.1,0.0
+Qwen3-0.6B,UD-IQ2_XXS→IQ4_NL,363.9,357.2,16.0,15,0,15,357.2,357.2,0.0
+Qwen3-0.6B,IQ4_XS→IQ4_NL,363.9,357.2,16.0,15,2,13,357.2,325.2,13.3

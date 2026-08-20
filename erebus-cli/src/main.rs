@@ -15,7 +15,7 @@ use std::process::ExitCode;
     name = "erebus",
     version,
     about = "Package any app into a single self-extracting binary",
-    long_about = "x.bin compiles any web, server, or CLI application into a\nsingle self-extracting ELF executable.\n\nSupported runtimes: Python, Node.js, Deno, Java, Ruby, .NET/C#,\nGo, PHP, Perl, Binary, Hugo.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus dashboard\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish"
+    long_about = "erebus compiles any web, server, or CLI application into a\nsingle self-extracting ELF executable.\n\nSupported runtimes: Python, Node.js, Deno, Java, Ruby, .NET/C#,\nGo, PHP, Perl, Binary, Hugo.\n\nExamples:\n  erebus build ./myapp -o myapp.erebus\n  erebus run myapp.erebus\n  erebus inspect myapp.erebus\n  erebus keygen\n  erebus sign myapp.erebus --key ~/.erebus/keys/*.key\n  erebus verify myapp.erebus\n  erebus doctor\n  erebus scan .\n  erebus dashboard\n  erebus swap myapp.erebus model ./new-model.gguf\n  erebus completion bash >> ~/.bashrc\n  erebus completion zsh >> ~/.zshrc\n  erebus completion fish > ~/.config/fish/completions/erebus.fish"
 )]
 struct Cli {
     /// Enable verbose output
@@ -87,6 +87,14 @@ enum Commands {
 
     /// Migrate a legacy .erebus (v1) to the SISR-enabled v2 format
     UpgradeBinary(commands::upgrade_binary::UpgradeBinaryArgs),
+
+    /// Swap a layer in an existing .erebus binary (hot-swap)
+    ///
+    /// Examples:
+    ///   erebus swap agent.ere model ./new-model.gguf
+    ///   erebus swap agent.ere config ./new-config.toml --sisr-delta
+    ///   erebus swap agent.ere model ./new-model.gguf -o agent-v2.ere
+    Swap(commands::swap::SwapArgs),
 
     /// Publish a .erebus file to a registry
     Publish(commands::publish::PublishArgs),
@@ -180,6 +188,12 @@ fn main() -> ExitCode {
                 args.quiet = true;
             }
             commands::upgrade_binary::run(args)
+        }
+        Commands::Swap(mut args) => {
+            if cli.quiet {
+                args.verbose = false;
+            }
+            commands::swap::run(args, effective_verbose)
         }
         Commands::Publish(args) => commands::publish::run(args),
         Commands::Env(args) => commands::env::run(args),

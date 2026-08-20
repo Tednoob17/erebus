@@ -119,7 +119,7 @@ pub fn setup_env(
     }
 
     // Framework-specific defaults (fill gaps only — .env and operator config win)
-    match meta.runtime.as_str() {
+    match meta.effective_runtime() {
         "python" => {
             if !env.contains_key("PYTHONUNBUFFERED") {
                 env.insert("PYTHONUNBUFFERED".into(), "1".into());
@@ -162,7 +162,7 @@ pub fn setup_env(
 
     // Ensure PORT is set for web frameworks
     if !env.contains_key("PORT") {
-        if let Some(port) = detect_web_port(rootfs, &meta.runtime) {
+        if let Some(port) = detect_web_port(rootfs, meta.effective_runtime()) {
             env.insert("PORT".into(), port.to_string());
         }
     }
@@ -623,7 +623,9 @@ fn enter_pivot_sandbox(rootfs: &Path, meta: &Metadata) -> io::Result<()> {
 /// Launch the app entrypoint. Blocks until the app exits (or never returns on
 /// successful execvp).
 pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::Result<()> {
-    if meta.entrypoint.is_empty() {
+    // Use effective entrypoint (layer-aware) for validation
+    let effective_entrypoint = meta.effective_entrypoint();
+    if effective_entrypoint.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "empty entrypoint",
@@ -697,10 +699,19 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
         // values (e.g. Java's `-Dserver.port=$PORT`).
         let env = setup_env(meta, rootfs, use_pivot, orig_cwd.as_deref(), app_config)?;
 
+        // Use effective entrypoint (layer-aware) for argv building
+        let effective_entrypoint = meta.effective_entrypoint();
+        if effective_entrypoint.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "empty entrypoint",
+            ));
+        }
+
         let mut argv: Vec<CString> = Vec::new();
         if direct_exec {
             argv.push(prog_c.clone());
-            for a in &meta.entrypoint[1..] {
+            for a in &effective_entrypoint[1..] {
                 if let Some(expanded) = expand_env_arg(a, &env) {
                     argv.push(cstr(resolve(&expanded).as_os_str().as_bytes())?);
                 }
@@ -716,7 +727,7 @@ pub fn exec_app(meta: &Metadata, rootfs: &Path, app_config: &AppConfig) -> io::R
                 ));
             }
             argv.push(cstr(interpreter_name.as_bytes())?);
-            for a in &meta.entrypoint[1..] {
+            for a in &effective_entrypoint[1..] {
                 if let Some(expanded) = expand_env_arg(a, &env) {
                     argv.push(cstr(resolve(&expanded).as_os_str().as_bytes())?);
                 }
@@ -791,12 +802,16 @@ pub fn resolve_entrypoint(
 ) -> io::Result<(PathBuf, bool, String)> {
     // Extract runtime name and entrypoint from layers when available.
     let (runtime_str, entrypoint_vec) = if let Some(layer_name) = &meta.entrypoint_layer {
-        let layer = meta.layers.iter().find(|l| l.name() == layer_name).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("entrypoint layer '{}' not found in layers", layer_name),
-            )
-        })?;
+        let layer = meta
+            .layers
+            .iter()
+            .find(|l| l.name() == layer_name)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("entrypoint layer '{}' not found in layers", layer_name),
+                )
+            })?;
         match layer {
             erebus_core::layer::SerializableLayer::Runtime(rt) => {
                 (rt.name.clone(), rt.entrypoint.clone())
@@ -875,9 +890,12 @@ pub fn spawn_app_windows(
     let cwd = meta.cwd.as_ref().map(|c| make_resolve(rootfs, false)(c));
     let resolve = make_resolve(rootfs, false);
 
+    // Use effective entrypoint (layer-aware)
+    let effective_entrypoint = meta.effective_entrypoint();
+
     let mut cmd = prog;
     if !is_executable_path(&cmd) {
-        cmd = find_in_bin_paths(rootfs, &meta.entrypoint[0]).ok_or_else(|| {
+        cmd = find_in_bin_paths(rootfs, &effective_entrypoint[0]).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
@@ -895,7 +913,7 @@ pub fn spawn_app_windows(
     } else {
         argv.push(std::ffi::OsString::from(interpreter_name));
     }
-    for a in &meta.entrypoint[1..] {
+    for a in &effective_entrypoint[1..] {
         if let Some(expanded) = expand_env_arg(a, &env) {
             argv.push(resolve(&expanded).into_os_string());
         }
@@ -1392,6 +1410,8 @@ mod tests {
             payload_format: String::new(),
             health_check: None,
             update_url: None,
+            layers: Vec::new(),
+            entrypoint_layer: None,
         };
 
         let app_config = AppConfig {
@@ -1539,6 +1559,8 @@ mod tests {
             payload_format: String::new(),
             health_check: None,
             update_url: None,
+            layers: Vec::new(),
+            entrypoint_layer: None,
         };
         let err = resolve_entrypoint(&meta, tmp.path(), false).unwrap_err();
         assert!(err.to_string().contains("unsupported runtime 'cobol'"));

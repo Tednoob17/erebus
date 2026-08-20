@@ -10,6 +10,7 @@ pub mod run;
 pub mod scan;
 pub mod selftest;
 pub mod sign;
+pub mod swap;
 pub mod trust;
 pub mod upgrade;
 pub mod upgrade_binary;

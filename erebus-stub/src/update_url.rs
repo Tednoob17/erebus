@@ -217,6 +217,8 @@ mod tests {
                 payload_format: String::new(),
                 health_check: None,
                 update_url: Some("https://meta.example/app".into()),
+                layers: Vec::new(),
+                entrypoint_layer: None,
             }
         };
         let base = resolve_update_url(&args, 0, &meta).unwrap();
