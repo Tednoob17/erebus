@@ -2,338 +2,164 @@
 
 ## Vision
 
-erebus est un **format d'artefact exécutable universel**, capable de transporter :
+erebus is a **universal self-extracting artifact format** — a single ELF binary
+containing `[stub][runtime][model][prompt][tools][config]` with no daemon, no
+container runtime, no host dependencies.
 
-- une application classique ✅
-- un agent IA (modèle + prompt + runtime) — objectif principal
-- un service/microservice — objectif
-- un plugin/extension — objectif
+### Supported artifact types
+| Type | Status |
+|------|--------|
+| Application | ✅ Production-ready |
+| AI Agent | ✅ (model + prompt + runtime + tools) |
+| Service / Multiservice | ✅ (`services[]` in metadata) |
+| Plugin | ✅ (`ArtifactType::Plugin`) |
+| Multi-agent | ✅ (one binary, multiple entrypoints via `--erebus-agent`) |
 
-> Le format est conçu comme une unité autonome = stub + runtime + payload + metadata + signature.
-> Rien n'est hérité du système hôte.
+### IoT targeting (Linux edge gateways)
+erebus solves real problems for edge AI deployment:
 
----
-
-## Use case clé : Agent IA
-
-Un agent IA est un binaire erebus qui contient :
-
-```
-[stub][runtime (python3)][model (gguf/bin)][prompt (toml)][tools (scripts/)][config]
-```
-
-**Ce que le format permet aujourd'hui :**
-- Packager modèle + prompt + runtime dans un seul binaire portable
-- Signature Ed25519 pour vérifier l'origine du modèle
-- Chiffrement AES-256-GCM pour protéger les poids du modèle
-- SISR pour update delta du modèle sans tout re-télécharger
-
-**Ce qui manque (et pourquoi les couches sont nécessaires) :**
-- **Hot-swap du modèle** : remplacer la couche `ModelLayer` (nouveaux poids) sans extraire le runtime, le prompt, ni les outils. Aujourd'hui le stub extrait tout le rootfs d'un coup — il faudrait extraire couche par couche et ne remplacer que la couche impactée.
-- **Lazy loading** : ne charger le modèle (2-7 Go) que lorsqu'il est appelé, pas au démarrage du process. Le stub devrait pouvoir monter les couches à la demande via FUSE ou un mapping mémoire.
-- **Multi-agent** : un seul binaire contenant 2-3 agents (chat, code, recherche) avec un entrypoint par agent. Le stub résout quel agent lancer selon les arguments.
-- **Outils dynamiques** : les scripts/tools sont une couche séparée — on peut les mettre à jour (nouvelles APIs, nouveaux outils) sans toucher au modèle.
-
-> Sans intégration des couches dans le stub (Phase 1), aucun de ces cas d'usage n'est possible.
+| Segment | Devices | Problem | erebus Solution |
+|---------|---------|---------|-----------------|
+| **Industrial edge gateways** | RK3566, i.MX8, Jetson Orin, Pi CM4 | 100-500MB OS rebuild for model update | `erebus swap model` + SISR delta (5-10MB) |
+| **Smart cameras / vision AI** | Jetson, Coral, Luxonis OAK | Model drift, cellular bandwidth cost | Delta update over 4G/LoRa, atomic rollback |
+| **PLC / controllers (Linux)** | Revolution Pi, Moxa UC, Advantech UNO | IEC 62443 compliance | Ed25519 signing, capability sandbox, health-gated rollback |
+| **Energy / smart grid** | Substation gateways, EV chargers | Remote, intermittent connectivity, CRA | Offline-first, signed updates, capability-driven (no net unless declared) |
+| **Fleet / telematics** | Vehicle gateways, railway boxes | Staged rollout, canary, rollback | Health gate + fleet manager integration |
 
 ---
 
-## État actuel (août 2026)
+## Completed Phases
 
-### Couche cœur (`erebus-core`)
-- ✅ CAS — `cas.rs` : `ObjectStore` trait, `MemoryStore`, `DiskObjectStore`
-- ✅ Format binaire — `format.rs` : v2 (plain), v3 (signed), v4 (encrypted), v5 (squashfs)
-- ✅ Metadata riche — `metadata.rs` : `ArtifactMetadata` avec `Vec<SerializableLayer>`
-- ✅ Signature Ed25519 — `crypto.rs`
-- ✅ Chiffrement AES-256-GCM — `encrypt.rs`
-- ✅ Détection runtime — `detect.rs` : 13 runtimes, `EntrypointRegistry`
-- ✅ Runtime Node.js — monorepo workspace sub-package scanning
-- ✅ Runtime Ruby — Jekyll entrypoint resolution
+### Phase 1: Layers in stub ✅
+Stub consumes `ArtifactMetadata.layers` — reads `layers[]`, `entrypoint_layer`,
+resolves entrypoint via `effective_entrypoint()`/`effective_runtime()`/`capabilities()`.
+The `Entrypoint` trait from core is **not** used by the stub (deliberate — stub
+contains `unsafe` `execvp` that core cannot).
 
-### Abstraction des couches (`layer.rs`)
-- ✅ Trait `Layer` : `name()`, `kind()`, `payload_sha256()`, `compression()`, `encryption()`, `capabilities()`
-- ✅ Trait `Entrypoint` : `layer()`, `execute()`, `health_check()`
-- ✅ `Capability` enum : `ReadFile`, `WriteFile`, `Network`, `Exec`, `Syscall`, `Env`
-- ✅ `EntrypointRegistry` : registre dynamique de runtimes
-- ✅ Types concrets : `RuntimeLayer`, `ModelLayer`, `ToolLayer`, `ConfigLayer`
-- ✅ `LayerKind` : `Runtime`, `Model`, `Tool`, `Config`, `Custom`
+### Phase 2: Hot-swap (SISR) ✅
+`erebus swap <binary> <layer> <file> [--sisr-delta --key]` — replaces a single
+layer without full rebuild. Delta computed at runtime via chunk reuse.
 
-### SISR / Delta updates (`sisr/`)
-- ✅ `SisrEngine` : réutilisation de chunks, vérification SHA-256, swap atomique
-- ✅ `HealthStore` : quarantaine, suivi des échecs
-- ✅ `AtomicWriter` : remplacement atomique de fichiers
-- ✅ Tests réseau avec injection de fautes
-- ✅ **Phase 7 — Feature flags** : `--no-sisr` / `--no-sign` bypass dans le stub
+### Phase 3: Lazy loading ✅
+`LazyFs` FUSE mount (`fuser` + `backhand`) — serves squashfs/zstd-tar layers on-demand
+without full extraction. Activated via `ERE_LAZY_LOAD=1`, falls back to full extract.
 
-### Assemblage
-- ✅ `assemble_erebus` : builder unifié avec `AtomicWriter`, aware SISR
-- ✅ Manifest distant : `.erebus.manifest`
+### Phase 4: Registry CAS ✅
+`Registry` trait + `MemoryRegistry` + `DiskRegistry` in `erebus-core/src/registry.rs`.
+CLI: `erebus registry push-layer|pull-layer|list-layers|publish-artifact|inspect-artifact|list-artifacts`.
+HTTP transport via `HttpRegistryClient` (reqwest, blocking, Bearer auth).
 
-### CLI (`erebus-cli`)
-- ✅ `build`, `inspect`, `scan`, `sign`, `verify`, `keygen`, `trust`
-- ✅ `doctor`, `env`, `clean`, `completion`, `man`, `upgrade`
-- ✅ `swap` (hot-swap layers)
-- ✅ `selftest`
-- ✅ `build` module split : 2978 lignes → 8 modules (`args`, `deps`, `pipeline`, `payload`, `sign`, `sisr`, `stub`, `mod`)
-- ✅ **Phase 6** : `--artifact-type` et `--entrypoint NAME=argv...` flags dans build
-- ✅ **Phase 4** : `erebus registry` CLI (push-layer, pull-layer, list-layers, publish-artifact, inspect-artifact, list-artifacts) + `Registry` trait + `HttpRegistryClient` dans core
+### Phase 5a: Security baseline ✅
+Seccomp BPF (18 syscalls blocked), Landlock LSM, Ed25519 signing, AES-256-GCM
+encryption, health-gated rollback, zeroize, Clé perms 0o600. 35 findings reviewed
+(17 true positives → all fixed). lru soundness fix (ratatui 0.29→0.30.2).
 
-### Stub launcher (`erebus-stub`)
-- ✅ Lecture footer/metadata depuis `/proc/self/exe`
-- ✅ Cache SHA-256, vérification d'intégrité
-- ✅ Extraction zstd+tar ou squashfs
-- ✅ `execvp` entrypoint
-- ✅ SISR delta update
-- ✅ Seccomp BPF — **capability-driven** (config dynamique depuis `layers[].capabilities`)
-- ✅ Landlock LSM — **capability-driven** (R/W rootfs si `WriteFile`, read-only sinon)
-- ✅ Health gate enforced — quarantaine + rollback automatique
-- ✅ Signal handler async-signal-safe (static mut + AtomicUsize, pas Mutex)
-- ✅ HTTP response 64 MiB limit (configurable via `ERE_HTTP_MAX_RESPONSE`)
-- ✅ Zeroize pour toutes les clés crypto (ed25519, AES-256, HKDF)
-- ✅ Clés privées en 0o600 (owner read/write only)
-- ✅ **Phase 1 — Lit `ArtifactMetadata.layers`** — `Metadata` a `layers: Vec<SerializableLayer>` + `entrypoint_layer`
-- ✅ **Phase 1 — Résolution entrypoint via couches** — `effective_entrypoint()`, `effective_runtime()`, `resolve_entrypoint()` utilisent les couches
-- ✅ **Phase 5b — Capability-driven seccomp** — `SeccompConfig::from_capabilities()` → filtre BPF dynamique (Exec/Network/Syscall)
-- ✅ **Phase 5b — Capability-driven landlock** — `LandlockConfig::from_capabilities()` → R/W rootfs si WriteFile
-- ✅ **Phase 3 — Lazy loading** : `LazyFs` FUSE mount à la demande via `fuser` + `backhand`, activation via `ERE_LAZY_LOAD=1`
-- ⚠️ N'utilise PAS le trait `Entrypoint` (a sa propre logique dans `exec.rs`) — couplage loose, délibéré (stub a `unsafe` execvp que le core ne peut pas contenir)
-- ✅ **Phase 6 — Multi-agent** : `entrypoints` map + `--erebus-agent` selector dans le stub
-- ✅ **Phase 7 — Feature flags** : `--no-sisr` et `--no-sign` bypass (via `ERE_NO_SISR`/`ERE_NO_SIGN`)
-- ✅ **Phase 7 — Error rescue** : pivot_root EPERM/EINVAL → fallback extract-only, seccomp ENOSYS → warning + continue
+### Phase 5b: Capability-driven security ✅
+`SeccompConfig::from_capabilities()` → dynamic BPF filter.
+`LandlockConfig::from_capabilities()` → R/W rootfs if `WriteFile`, read-only otherwise.
+Capabilities: `ReadFile`, `WriteFile`, `Network`, `Exec`, `Syscall`, `Env`.
 
-### Sécurité
-- ✅ 35 findings review (17 true positives → tous fixés)
-- ✅ ANSSI-Rust compliance check — zero unsafe dans erebus-core et erebus-cli
-- ✅ PHP default bind 127.0.0.1 (pas 0.0.0.0), configurable via `ERE_PHP_HOST`
-- ✅ **lru soundness fix** — ratatui `0.29 → 0.30.2` (pull lru `0.18.2` ≥ `0.16.3` patché)
+### Phase 6: Templates + multi-agent ✅
+`ArtifactType` enum (`Application`/`Agent`/`Service`/`Plugin`). Multi-agent entrypoints
+map + `--erebus-agent` selector. CLI flags: `--artifact-type`, `--entrypoint NAME=args`.
+Examples in `examples/`, migration guide in `docs/migration/`.
 
-### Build & DevX
-- ✅ `build` module split : 2978 lignes → 8 modules sous `commands/build/`
-- ✅ `.gitignore` fix : `build/` → `/build/` pour tracker le module directory
+### Phase 7: Operational hardening ⏳ (partial)
+- ✅ Observability: stderr logging `[erebus] ...` on all phases
+- ✅ Health gate: quarantine + atomic rollback (`HealthStore`)
+- ✅ Atomic swap: `AtomicWriter` with rollback snapshot
+- ✅ Signal handler: async-signal-safe (`static mut + AtomicUsize`)
+- ✅ HTTP 64 MiB limit (configurable via `ERE_HTTP_MAX_RESPONSE`)
+- ✅ Zeroize all crypto keys, privkey perms 0o600
+- ✅ `erebus selftest` CLI command
+- ✅ Feature flags: `--no-sisr` / `--no-sign` (via `ERE_NO_SISR`/`ERE_NO_SIGN`)
+- ✅ Error rescue: pivot_root EPERM/EINVAL → extract-only fallback, seccomp ENOSYS → warning
+- ✅ Rollback runbook: `docs/runbooks/rollback-after-bad-deploy.md`
+- ❌ **Missing**: Prometheus metrics / `--metrics :9090`, `SECURITY-AUDIT.md`,
+  ASCII diagrams in source code, chaos testing CLI
 
 ---
 
-## Ce qui reste à faire
+## What erebus CANNOT Do (MCU / Bare Metal)
 
-### Phase 1 : Intégrer les couches dans le stub ✅ FAIT
+erebus stub is Linux-only (`pivot_root`, `libc`, `execvp`). Does not run on Cortex-M,
+ESP32, Zephyr, FreeRTOS, bare metal.
 
-**Objectif** : Le stub doit consommer le système de couches, pas le contourner.
-
-1. ✅ **Faire lire `ArtifactMetadata.layers` par le stub** — `Metadata` struct dans `main.rs` a `layers: Vec<SerializableLayer>` + `entrypoint_layer: Option<String>` avec `#[serde(default)]`
-2. ✅ **Utiliser les couches pour résoudre l'entrypoint** — `resolve_entrypoint()` dans `exec.rs` extrait interpreter/argv du layer quand `entrypoint_layer` présent ; `exec_app()` utilise `meta.effective_entrypoint()`
-3. ✅ **Extraction monolithique** — rootfs extrait en bloc ; extraction lazy (Phase 3) est optionnelle via `ERE_LAZY_LOAD=1`
-4. ✅ **Garder `Metadata` plat pour backward compat** — `runtime`/`entrypoint` fallbacks présents
-
-> ✅ Phase 1 **complètement terminée** — le stub consomme `layers`, `entrypoint_layer`, et utilise `effective_entrypoint()`/`effective_runtime()` pour résoudre l'entrypoint. L'extraction monolithique est délibérée (lazy loading = Phase 3). Le trait `Entrypoint` du core (`layer.rs`) n'est pas utilisé par le stub car le stub a du code `unsafe` (`execvp`) que le core ne peut pas contenir — c'est une séparation de sécurité volontaire.
-
-### Phase 2 : Hot-swap de couches ✅ FAIT
-
-**Objectif** : Remplacer une couche sans rebuild complet du binaire.
-
-1. ✅ **Commande `erebus swap <binary> <layer-name> <new-layer-file>`** — implémentée dans `erebus-cli/src/commands/swap.rs`
-   - ✅ Lit footer + metadata depuis `/proc/self/exe`
-   - ✅ Trouve layer cible par nom dans `metadata.layers`
-   - ✅ Accepte fichier ou répertoire (auto-tar pour dirs)
-   - ✅ Recalcule SHA-256, met à jour `layer.payload_sha256`
-   - ✅ Ré-assemble via `AtomicWriter` (atomic rename, bit exécutable préservé)
-2. ✅ **SISR-aware** : `--sisr-delta` génère delta update si binaire a SISR + clé de signature (`--key`)
-3. ✅ **Use case agent** : `erebus swap agent.ere model ./nouveaux-poids.gguf` fonctionne
-
-**Usage** :
-```bash
-erebus swap agent.ere model ./new-model.gguf
-erebus swap agent.ere model ./new-model.gguf --sisr-delta --key ~/.erebus/keys/*.key
-erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
-```
-
-> Note: `--sisr-delta` génère un binaire complet avec SISR manifeste — le delta est calculé **à l'exécution** par le stub (chunk reuse), pas à la compilation. Le `swap` command ne compare pas la taille du delta vs le téléchargement complet.
-
-### Phase 3 : Lazy loading (4-5 jours) ✅ FAIT
-
-**Objectif** : Ne charger que les couches nécessaires, à la demande.
-
-1. ✅ **Montage FUSE à la demande** — `LazyFs` dans `erebus-stub/src/lazy_fs.rs` monte le payload via FUSE (`fuser` crate) sans extraction complète
-2. ✅ **Support squashfs + zstd-tar** — lecture à la demande via `backhand` (squashfs) ou streaming tar/zstd
-3. ✅ **Activation via env** — `ERE_LAZY_LOAD=1` active le mode lazy (fallback vers extraction complète par défaut)
-4. ✅ **Layer-aware** — utilise `metadata.layers[]` pour servir seulement les couches déclarées
-5. ⏳ **CLI `erebus preload`** — pré-chargement manuel (optionnel, futur)
-
-### Phase 4 : Registry CAS ✅ FAIT
-
-**Objectif** : Publier/charger des couches via un registre distant.
-
-1. ✅ **`Registry` trait + `MemoryRegistry` + `DiskRegistry`** dans `erebus-core/src/registry.rs`
-   - `push_layer(hash, data) -> String` — upload layer blob, vérifie hash
-   - `pull_layer(hash) -> Option<Vec<u8>>` — download layer by content hash
-   - `publish_artifact(ArtifactRecord)` — register artifact metadata
-   - `inspect_artifact(hash)` — fetch artifact metadata
-   - `list_layers()` / `list_artifacts()` — list available content
-   - Transport : HTTP/HTTPS (`HttpRegistryClient` dans `erebus-cli/src/commands/registry.rs` avec `reqwest` blocking)
-2. ✅ **CLI `erebus registry push/pull/list`** — `push-layer`, `pull-layer`, `list-layers`, `publish-artifact`, `inspect-artifact`, `list-artifacts`
-3. ⏳ **Intégrer au build** : `erebus build --publish` non implémenté (reste manuel via `erebus registry publish-artifact`)
-4. ⏳ **Use case de partage de runtime** : nécessite `erebus-registry` serveur (futur)
-
-### Phase 5a : Security audit + enforcement de base ✅ FAIT
-
-**Objectif** : Sécurité de base du stub. **Entièrement complété (août 2026).**
-
-1. ✅ Seccomp BPF denylist — 18 syscalls dangereux bloqués (`seccomp.rs`)
-2. ✅ Landlock LSM — sandbox rootfs R/W, lecture seule ailleurs (`landlock.rs`)
-3. ✅ Health gate enforced — quarantaine + rollback automatique (`main.rs`)
-4. ✅ Signal handler async-signal-safe (static mut + AtomicUsize)
-5. ✅ HTTP response 64 MiB limit
-6. ✅ Zeroize pour toutes les clés crypto
-7. ✅ Clés privées en 0o600
-8. ✅ 35 findings review (17 true positives → tous fixés)
-
-### Phase 5b : Capability-driven security ✅ FAIT
-
-**Objectif** : Les `Capability` doivent être vérifiées, pas juste déclarées. Le seccomp/landlock est maintenant capability-driven.
-
-1. ✅ **Lire les capabilities depuis le binaire** — `Metadata::capabilities()` dans `main.rs:194` collecte `layers[].capabilities` (dédupliquées)
-2. ✅ **Enforcer les capabilities dans le stub** :
-   - `Exec` → seccomp allow `execve`/`execveat` (sinon deny)
-   - `Network` → seccomp allow socket/connect/bind/listen/accept (sinon deny)
-   - `Syscall` → seccomp allow dangerous syscalls (mount, pivot_root, kexec, etc.) (sinon deny)
-   - `WriteFile` → landlock R/W rootfs (sinon read-only)
-3. ✅ **Remplacer les denylists hardcoded** — `SeccompConfig::from_capabilities()` + `build_seccomp_filter()` dynamique (BPF construit selon caps) ; `LandlockConfig::from_capabilities()` + `sandbox()` config-driven
-4. ✅ **Tests de sandboxing** — `seccomp.rs` tests: `validate_default_config_allows_exec_network_denies_syscalls`, `validate_no_capabilities_denies_all`, `validate_capability_config_mapping`
-
-**Implémentation** :
-- `erebus-stub/src/seccomp.rs` — `SeccompConfig`, `from_capabilities()`, `install_seccomp_filter()`, `build_seccomp_filter()`
-- `erebus-stub/src/landlock.rs` — `LandlockConfig`, `from_capabilities()`, `sandbox(root, config)`
-- `erebus-stub/src/exec.rs:605-624` — `enter_pivot_sandbox()` appelle les deux avec `meta.capabilities()`
-
-> **Débloqué** — Phase 1 terminée, le stub lit `meta.layers` et applique les capabilities.
-
-### Phase 6 : Templates + multi-agent ✅ FAIT
-
-**Objectif** : Supporter les cas d'usage au-delà des applications.
-
-1. ✅ **Templates de metadata** — `ArtifactType` enum (`Application`/`Agent`/`Service`/`Plugin`) dans `erebus-core/src/metadata.rs`
-   - `artifact_type` field in `ArtifactMetadata` (default: `Application` pour backward compat)
-   - `--artifact-type` flag dans le CLI build
-2. ✅ **Multi-agent** — entrypoints nommés + sélecteur `argv[1]`/`--erebus-agent`
-   - `entrypoints: BTreeMap<String, Vec<String>>` + `multi_agent: bool` dans metadata
-   - `--entrypoint NAME=argv0,arg1,arg2` (repeatable) dans le CLI build
-   - Stub resolution: `select_agent_from_args()` → `--erebus-agent NAME` or `argv[1]`
-   - Argv stripping via `ERE_AGENT_SELECTED`/`ERE_AGENT_NAME` env vars (`exec.rs`)
-3. ✅ **Exemples concrets** — `examples/python-agent/`, `examples/multi-agent/`, `examples/microservice-cluster/`, `examples/hugo-plugin/` créés
-4. ✅ **Documentation** — guide migration AppImage → erebus agents (`docs/migration/appimage-to-erebus.md`)
+### Existing solutions (do not reinvent)
+| Tool | Approach | Target |
+|------|----------|--------|
+| **Minerva** (EuroSys '26) | Linker-isolated capsules, in-place `memcpy` swap | ARM Cortex-M, Zephyr |
+| **TinyMLDelta** | Binary diff patches (RLE+CRC32), A/B flash slots | TFLite Micro, Zephyr, ESP32 |
+| **RIOT-ML** | SUIT manifests (RFC 9019), CoAP registry, uTVM | ARM Cortex-M, ESP32, RISC-V |
+| **Zephyr LLEXT** | Linkable Loadable Extensions | Zephyr RTOS, 500+ boards |
+| **mallorn** | Tensor-aware diffing (ZipNN), GGUF/TFLite/ONNX | MCU-friendly streaming patches |
 
 ---
 
-## Priorité
+## Future Roadmap
 
-1. ✅ **Phase 1** (stub → couches) — **FAIT**. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `effective_runtime()`, `capabilities()`, `resolve_entrypoint()` consommés par le stub. Extraction monolithique (rootfs complet), mais la spécification dit que l'extraction lazy/différée est Phase 3. Le trait `Entrypoint` du core n'est pas utilisé par le stub — c'est délibéré (stub a du `unsafe` `execvp` que le core ne peut pas contenir ; le trait sert la validation des layers).
-2. ✅ **Phase 2** (hot-swap) — Terminé. `erebus swap` command avec SISR delta
-3. ✅ **Phase 3** (lazy loading) — **FAIT**. `LazyFs` FUSE mount à la demande via `fuser` + `backhand`, activation via `ERE_LAZY_LOAD=1`
-4. ✅ **Phase 4** (registry CAS) — Terminé. `Registry` trait + `MemoryRegistry` + `DiskRegistry` dans core, CLI `erebus registry` (push/pull/list/inspect), HTTP transport (`HttpRegistryClient`)
-5. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
-6. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
-7. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
+### Short term (Phase 7 completion)
+1. **Prometheus metrics** — `--metrics :9090` exposing cold start, cache hits,
+   update size, health gate status
+2. **`SECURITY-AUDIT.md`** — full audit report with findings + mitigations
+3. **ASCII diagrams in source** — embed in `main.rs`, `exec.rs`, `seccomp.rs`
+4. **Chaos testing CLI** — expose fault injection as `erebus test chaos`
+
+### Future tools (separate crates)
+| Tool | Purpose |
+|------|---------|
+| **erebus-registry** | HTTP/CoAP server for layer push/pull, artifact publish |
+| **erebus-fleet** | Fleet manager: staged rollout, canary, health telemetry |
+| **erebus-sbom** | Generate SPDX/CycloneDX from `metadata.layers[]` |
+| **erebus-wasm** | WASM component support (`Capability::Wasm` → seccomp allow `mmap`/`mprotect`) |
+| **erebus-template** | Project scaffolding (`erebus init --template agent\|service\|plugin`) |
+| **erebus-bench** | Standardized benchmarks (cold start, inference latency, update size) |
+| **erebus-mcu** | Bare-metal MCU support (capsules, SUIT manifests, A/B flash slots) |
+
+### Research-backed priorities
+| Priority | Source | Action |
+|----------|--------|--------|
+| Delta updates | RIOT-ML: 99% network savings for weights-only | ✅ SISR done |
+| A/B partitions / atomic swap | Minerva, TinyMLDelta, Simms, RIoT | ✅ `AtomicWriter` + rename; MCU needs flash slots |
+| Health-gated rollback | Simms, RIoT Secure, Golioth, zed.io | ✅ Health gate in stub; fleet integration needed |
+| Capability-driven sandbox | RIoT Secure, CRA, IEC 62443 | ✅ Phase 5b done |
+| Model fingerprinting | mallorn: ~10ms version detection | Add to `erebus inspect` |
+| Tensor-aware diffing | mallorn (ZipNN), TinyMLDelta | For `erebus-mcu` patches |
 
 ---
 
-### Phase 7 : Operational Hardening ⏳
+## Decision Matrix
+
+| If User Needs... | Use |
+|------------------|-----|
+| Linux edge gateway, single binary deploy | **erebus** (today) |
+| Bare-metal MCU (Cortex-M, ESP32), TinyML | **Minerva** / **TinyMLDelta** / **Zephyr LLEXT** |
+| Fleet orchestration, staged rollout | **erebus-fleet** (future) / Golioth / Balena |
+| Layer sharing across artifacts | **erebus-registry** (future) / S3-compatible |
+| Regulatory SBOM | **erebus-sbom** (future) |
+| WASM plugins | **erebus-wasm** (future) |
 
 ---
 
-## Single Points of Failure & Mitigations
+## Single Points of Failure
 
 | SPOF | Risk | Mitigation | Status |
 |------|------|------------|--------|
-| SISR manifest server (remote `.erebus.manifest`) | Network outage → updates fail permanently | Manifest fetched via HTTP with retry; stub reads its own embedded SISR manifest for chunk reuse context | ⚠️ Partiel |
-| Cache corruption (`~/.cache/erebus/<hash>/`) | Corrupted cache → wrong behavior | `cache_root_trustworthy()` checks ownership + SHA-256 verification at cache check | ✅ Mitigé |
-| CI musl cross-compilation | musl toolchain unavailable → no ARM builds | CI builds on x86_64 musl only; no multi-arch yet | ⚠️ A améliorer |
-| Ed25519 signing key compromise | Attacker can forge binaries | `ed25519-dalek >= 2.1` enforces key clamping (CVE-2023-48022); key perms checked at build | ✅ Mitigé |
-
-```
-  SISR UPDATE FLOW
-  ┌─────────────────┐
-  │ User runs:      │
-  │ ./myapp.ere    │
-  └────────┬────────┘
-           │
-           ▼
-  ┌──────────────────┐   NO   ┌──────────────┐
-  │ Footer.has_sisr()?├───────►│ Classic      │
-  └────────┬──────────┘        │ extraction   │
-           │ YES               └──────────────┘
-           ▼
-  ┌──────────────────┐
-  │ Fetch            │
-  │ .erebus.manifest │
-  └────────┬─────────┘
-           │
-    ┌──────▼──────┐
-    │ SHA-256     │
-    │ verify      │
-    └──────┬──────┘
-           │
-  ┌────────▼────────┐   ┌─────────────────┐
-  │ Chunk lookup    │◄──┤ Cache hits?     │
-  │ in cache        │   └─────────────────┘
-  └─────────────────┘
-           │
-           ▼
-  ┌─────────────────┐
-  │ Merge new+cached│
-  │ chunks          │
-  └────────┬────────┘
-           │
-           ▼
-  ┌─────────────────┐
-  │ Verify SHA-256  │
-  │ of merged       │
-  │ payload         │
-  └────────┬────────┘
-           │
-           ▼
-  ┌─────────────────┐
-  │ Atomic swap to  │
-  │ cache dir       │
-  └────────┬────────┘
-           │
-           ▼
-  ┌─────────────────┐
-  │ execvp entrypoint│
-  └─────────────────┘
-```
+| SISR manifest server | Network outage → updates fail | HTTP retry; fallback to classic extraction if manifest unavailable | ⚠️ Partial |
+| Cache corruption (`~/.cache/erebus/<hash>/`) | Corrupted cache → wrong behavior | `cache_root_trustworthy()` checks ownership + SHA-256 verify | ✅ Mitigated |
+| CI musl cross-compilation | musl toolchain unavailable → no ARM builds | CI builds on x86_64 musl only; no multi-arch yet | ⚠️ Needs improvement |
+| Ed25519 signing key compromise | Attacker forges binaries | `ed25519-dalek >= 2.1` enforces key clamping (CVE-2023-48022); key perms 0o600 at build | ✅ Mitigated |
 
 ---
 
-## Phase 7: Operational Hardening ⏳
+## Technical Constraints
 
-**Objectif** : Passer de "fonctionne" à "fiable en production" avec observability, rollback, et documentation des flux critiques.
-
-### Déjà implémenté ✅
-
-- **Observabilé** : logging stderr (`[erebus] ...`) sur toutes les phases (extraction, vérification SISR, health gate, exec)
-- **Health gate** : quarantaine + rollback automatique (`HealthStore`, `main.rs:390`)
-- **Atomic swap** : `AtomicWriter` avec rollback snapshot (`main.rs:568`)
-- **Signal handler** : async-signal-safe (`static mut + AtomicUsize`)
-- **HTTP 64 MiB limit** : configurable via `ERE_HTTP_MAX_RESPONSE`
-- **Zeroize** : toutes les clés crypto (ed25519, AES-256, HKDF)
-- **Clé permissions** : 0o600 warning au build (`sign.rs:49`)
-- **`erebus selftest`** : CLI command implémenté (`commands/selftest.rs`)
-- **Feature flags `--no-sisr` / `--no-sign`** : bypass SISR update et signature verification (`main.rs`)
-- **Error rescue map** : pivot_root EPERM/EINVAL fallback → extract-only (`exec.rs:672`), seccomp ENOSYS → warning + continue (`exec.rs:607`)
-- **Rollback runbook** : `docs/runbooks/rollback-after-bad-deploy.md`
-
-### Il manque ❌
-
-1. **Observability structurée** : pas de métriques Prometheus, pas de `--metrics :9090`
-2. **ASCII diagrams dans le code source** : pas de diagrams dans les sources
-3. **Security audit deliverables** : `SECURITY-AUDIT.md` n'existe pas
-4. **Chaos testing CLI** : tests de fault injection dans `sisr/network_test.rs` mais pas comme commandes CLI
+- **vfat**: repo lives on vfat (no exec bit). Cargo target dir is `/tmp/erebus-stub-target`.
+- **musl**: stub builds with `--target x86_64-unknown-linux-musl` for static ELF.
+- **CI**: clippy runs per-crate, not workspace-wide.
+- **Edition**: Rust 2021, stable only (no nightly/beta).
+- **Safety**: zero `unsafe` in `erebus-core` and `erebus-cli`. All `unsafe` in `erebus-stub`.
 
 ---
 
-## Contraintes techniques
-
-- **vfat** : le repo vit sur vfat (pas de bit exec). Les artefacts build vont dans `/tmp/erebus-stub-target`.
-- **musl** : le stub compile avec `--target x86_64-unknown-linux-musl` pour un ELF statique.
-- **CI** : clippy est lancé par crate, pas workspace-wide.
-- **Edition** : Rust 2021, stable uniquement (pas de nightly).
-- **Sécurité** : zero `unsafe` dans `erebus-core` et `erebus-cli`. Toute la logique unsafe est dans `erebus-stub`.
+*Last updated: 2026-08-20*

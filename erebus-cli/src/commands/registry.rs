@@ -29,8 +29,8 @@ pub enum RegistryCommand {
 
     /// Pull a layer from the registry
     PullLayer {
-        /// Layer hash (hex-encoded SHA-256) or "latest"
-        #[arg(short, long)]
+        /// Layer hash (hex-encoded SHA-256)
+        #[arg(short = 'H', long)]
         hash: String,
 
         /// Output path for the downloaded layer
@@ -51,7 +51,7 @@ pub enum RegistryCommand {
     /// Inspect an artifact in the registry
     InspectArtifact {
         /// Artifact hash (hex-encoded SHA-256 of the .erebus binary)
-        #[arg(short, long)]
+        #[arg(short = 'H', long)]
         hash: String,
     },
 

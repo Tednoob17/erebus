@@ -491,7 +491,7 @@ fn run() -> io::Result<()> {
             fs::create_dir_all(&rootfs_path)?;
 
             // Mount lazy filesystem in background
-            let mount_handle = crate::lazy_fs::mount_lazy_fs(layers, &rootfs_path)?;
+            let _mount_handle = crate::lazy_fs::mount_lazy_fs(layers, &rootfs_path)?;
             // Store handle to keep mount alive (dropped at end of scope)
             // For now, we spawn a thread to keep the mount alive
             std::thread::spawn(move || {
