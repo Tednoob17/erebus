@@ -77,7 +77,7 @@ large, unchanged model. Even with 16 MiB chunks, only 1–9 chunks need to be fe
 Total build time dominated by payload compression (zstd level 3), not network.
 Delta generation is O(chunks) ≈ O(1) — near-instant manifest comparison.
 
-## Key findings
+### Key findings
 
 1. **16 MiB chunks work best for large models**: With 16 MB chunk targets,
    a 200 MB model yields ~12 chunks. A single code-layer change invalidates
@@ -89,8 +89,16 @@ Delta generation is O(chunks) ≈ O(1) — near-instant manifest comparison.
 
 3. **Quantization switches are costly**: Different quantizations produce
    entirely different byte sequences, so 16 MB chunks have 0% reuse.
-   For quantization migrations, 64 KB chunks would fare better but still
-   have low overlap due to the fundamentally different data layout.
+   With 64 KB chunks, some structural overlap may be detected (e.g., IQ4_XS→IQ4_NL
+   achieved 13.3% reuse with 16 MB chunks).
+
+4. **No "negative delta" fallback needed**: The SISR delta is not a separate
+   file — it's computed dynamically at runtime by the stub engine. The client
+   reads its own embedded manifest, compares chunk hashes with the remote
+   manifest, and only requests chunks it doesn't already have. The worst case
+   is downloading 100% of chunks (equal to full download size); there's no
+   scenario where the delta exceeds the full download, because the delta IS
+   the set of missing chunks.
 
 4. **Optimal use case**: SISR shines when the large payload (model/weights)
    is static and only the small application code layer changes between versions.
