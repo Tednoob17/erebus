@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Args;
 use erebus_core::detect;
+use erebus_core::flatpak::PackageFormat;
 use serde::Deserialize;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,8 @@ pub(crate) struct BuildPlan {
     pub(crate) gui: bool,
     pub(crate) encrypt: bool,
     pub(crate) squashfs: bool,
+    #[allow(dead_code)]
+    pub(crate) package_format: PackageFormat,
     pub(crate) version_info: Option<String>,
     pub(crate) author: Option<String>,
     pub(crate) description: Option<String>,
@@ -311,6 +314,10 @@ pub struct BuildArgs {
     #[arg(long)]
     pub squashfs: bool,
 
+    /// Package format: erebus (default), flatpak, snap
+    #[arg(long, value_enum, default_value_t = PackageFormat::Erebus)]
+    pub package_format: PackageFormat,
+
     /// Enable SISR delta-indexing and self-update support
     #[arg(long)]
     pub enable_sisr: bool,
@@ -494,6 +501,8 @@ pub(crate) struct BuildConfig {
     pub gui: Option<bool>,
     pub encrypt: Option<bool>,
     pub squashfs: Option<bool>,
+    #[allow(dead_code)]
+    pub package_format: Option<PackageFormat>,
     pub target: Option<String>,
     pub no_install: Option<bool>,
     pub env_file: Option<String>,
@@ -741,6 +750,7 @@ mod tests {
             embed_model: None,
             artifact_type: "application".into(),
             agent_entrypoints: Vec::new(),
+            package_format: PackageFormat::Erebus,
         }
     }
 
@@ -760,6 +770,7 @@ mod tests {
             landlock: false,
             encrypt,
             squashfs,
+            package_format: PackageFormat::Erebus,
             version_info: None,
             author: None,
             description: None,

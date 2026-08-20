@@ -876,6 +876,17 @@ pub(crate) fn build_single_target(
         size as f64 / (1024.0 * 1024.0)
     );
 
+    // Generate Flatpak or Snap packaging files if requested
+    match args.package_format {
+        erebus_core::flatpak::PackageFormat::Flatpak => {
+            generate_flatpak_artifacts(output, app_dir, runtime_name, &meta)?;
+        }
+        erebus_core::flatpak::PackageFormat::Snap => {
+            generate_snap_artifacts(output, app_dir, runtime_name)?;
+        }
+        erebus_core::flatpak::PackageFormat::Erebus => { /* default — no extra artifacts */ }
+    }
+
     if args.enable_sisr {
         eprintln!(
             "warning: SISR binaries are NOT signed at rest — authenticity is only guaranteed \
@@ -964,4 +975,76 @@ pub(crate) fn build_single_target(
         })));
     }
     Ok(None)
+}
+
+/// Generate Flatpak manifest + .desktop file next to the built binary.
+fn generate_flatpak_artifacts(
+    output: &std::path::Path,
+    _app_dir: &std::path::Path,
+    runtime_name: &str,
+    meta_json: &[u8],
+) -> Result<()> {
+    let app_name = output.file_stem().and_then(|s| s.to_str()).unwrap_or("app");
+
+    let meta: serde_json::Value =
+        serde_json::from_slice(meta_json).unwrap_or(serde_json::json!({}));
+
+    let layers: Vec<erebus_core::layer::SerializableLayer> = vec![];
+
+    let entrypoint: Vec<String> = meta["entrypoint"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![runtime_name.to_string()]);
+
+    let manifest =
+        erebus_core::flatpak::generate_manifest(app_name, runtime_name, &entrypoint, &layers)?;
+
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).context("failed to serialize Flatpak manifest")?;
+
+    let out_dir = output.parent().unwrap_or(std::path::Path::new("."));
+    let manifest_path = out_dir.join("flatpak-manifest.json");
+    std::fs::write(&manifest_path, manifest_json)?;
+
+    let desktop_content = erebus_core::flatpak::generate_desktop_file(
+        app_name,
+        meta["name"].as_str().unwrap_or(app_name),
+    );
+    let desktop_path = out_dir.join(format!("{}.desktop", app_name));
+    std::fs::write(&desktop_path, desktop_content)?;
+
+    eprintln!("  Flatpak manifest: {}", manifest_path.display());
+    eprintln!("  Desktop file: {}", desktop_path.display());
+
+    Ok(())
+}
+
+/// Generate snapcraft.yaml next to the built binary.
+fn generate_snap_artifacts(
+    output: &std::path::Path,
+    _app_dir: &std::path::Path,
+    runtime_name: &str,
+) -> Result<()> {
+    let app_name = output.file_stem().and_then(|s| s.to_str()).unwrap_or("app");
+
+    let snap_config = erebus_core::snap::generate_snapcraft_yaml(
+        app_name,
+        "1.0.0",
+        None,
+        runtime_name,
+        &[runtime_name.to_string()],
+        &erebus_core::metadata::ArtifactType::Application,
+    )?;
+
+    let yaml = erebus_core::snap::generate_yaml_string(&snap_config)?;
+    let out_dir = output.parent().unwrap_or(std::path::Path::new("."));
+    let snap_path = out_dir.join("snapcraft.yaml");
+    std::fs::write(&snap_path, yaml)?;
+
+    eprintln!("  Snap manifest: {}", snap_path.display());
+    Ok(())
 }

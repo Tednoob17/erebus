@@ -281,7 +281,7 @@ impl LazyFs {
         };
 
         let mut results = Vec::new();
-        for (entry_path, entry) in &self.entries {
+        for entry_path in self.entries.keys() {
             if entry_path.starts_with(&prefix) {
                 let rest = &entry_path[prefix.len()..];
                 if !rest.contains('/') && !rest.is_empty() {
@@ -350,7 +350,7 @@ impl Filesystem for LazyFs {
     fn readdir(
         &self,
         _req: &Request,
-        ino: INodeNo,
+        _ino: INodeNo,
         _fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectory,

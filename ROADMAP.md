@@ -49,6 +49,16 @@ without full extraction. Activated via `ERE_LAZY_LOAD=1`, falls back to full ext
 CLI: `erebus registry push-layer|pull-layer|list-layers|publish-artifact|inspect-artifact|list-artifacts`.
 HTTP transport via `HttpRegistryClient` (reqwest, blocking, Bearer auth).
 
+### Phase 6: Templates + multi-agent ✅
+`ArtifactType` enum (`Application`/`Agent`/`Service`/`Plugin`). Multi-agent entrypoints
+map + `--erebus-agent` selector. CLI flags: `--artifact-type`, `--entrypoint NAME=args`.
+Examples in `examples/`, migration guide in `docs/migration/`.
+
+### Phase 7b: Desktop packaging ✅
+`--package-format flatpak|snap` flag generates distribution-ready packaging files.
+`PackageFormat` enum in `erebus-core/src/flatpak.rs`. Flatpak: `flatpak-manifest.json` + `.desktop`.
+Snap: `snapcraft.yaml` with apps/services/confinement. Runtime→Flatpak runtime mapping.
+
 ### Phase 5a: Security baseline ✅
 Seccomp BPF (18 syscalls blocked), Landlock LSM, Ed25519 signing, AES-256-GCM
 encryption, health-gated rollback, zeroize, Clé perms 0o600. 35 findings reviewed
@@ -78,6 +88,15 @@ Examples in `examples/`, migration guide in `docs/migration/`.
 - ❌ **Missing**: Prometheus metrics / `--metrics :9090`, `SECURITY-AUDIT.md`,
   ASCII diagrams in source code, chaos testing CLI
 
+### Phase 7b: Desktop packaging ✅
+`--package-format flatpak|snap` flag generates distribution-ready packaging files:
+- **`PackageFormat` enum** (`Erebus`/`Flatpak`/`Snap`) in `erebus-core/src/flatpak.rs`
+- **Flatpak**: generates `flatpak-manifest.json` + `.desktop` file with runtime mapping
+  (python/node/ruby/etc → `org.freedesktop.Platform`)
+- **Snap**: generates `snapcraft.yaml` with app/service definitions, confinement, plugs
+- Runtime → Flatpak runtime mapping: `runtime_mapping()` function
+- `erebus build ./app --package-format flatpak -o app.flatpak` → emits manifest + desktop
+
 ---
 
 ## What erebus CANNOT Do (MCU / Bare Metal)
@@ -105,6 +124,147 @@ ESP32, Zephyr, FreeRTOS, bare metal.
 3. **ASCII diagrams in source** — embed in `main.rs`, `exec.rs`, `seccomp.rs`
 4. **Chaos testing CLI** — expose fault injection as `erebus test chaos`
 
+### Phase 8: Universal Build Compatibility (100% GitHub Trending Coverage)
+
+This phase aims to make erebus build **any repo on GitHub trending** across all languages.
+Priority order based on GitHub trending frequency + impact.
+
+#### 8.1 Missing Runtime Support (New Languages)
+
+| Priority | Runtime | Build System | Key Challenges | Effort |
+|----------|---------|--------------|----------------|--------|
+| **P0** | **Rust** | Cargo | Workspaces, proc-macros, build.rs, cross-compile, proc-macro crates | High |
+| **P0** | **Go** | Go Modules | Private modules, CGO, cross-compile, go.work, replace directives | High |
+| **P1** | **Java** | Maven/Gradle | Wrapper scripts (mvnw/gradlew), multi-module, JDK version detection | Medium |
+| **P1** | **.NET** | MSBuild/dotnet CLI | csproj/sln, NuGet.config, global.json, dotnet publish | Medium |
+| **P2** | **Swift** | SwiftPM | Not yet supported | Medium |
+| **P2** | **Kotlin** | Gradle/Maven | Same as Java + Kotlin DSL | Medium |
+| **P3** | **Scala** | sbt | Not supported | Low |
+| **P3** | **C/C++** | CMake/Make/Meson | Build system diversity | Low |
+| **P3** | **Zig** | Zig build | Not supported | Low |
+| **P3** | **Nim** | Nimble | Not supported | Low |
+| **P3** | **Haskell** | Cabal/Stack | Not supported | Low |
+
+**Implementation approach per language:**
+- Detect via marker files (Cargo.toml, go.mod, pom.xml, build.gradle, csproj, Package.swift, etc.)
+- Auto-detect package manager (Cargo, go modules, Maven/Gradle, dotnet, SwiftPM)
+- Implement build step: `cargo build --release`, `go build`, `mvn package`, `dotnet publish`, etc.
+- Cross-compile: `--target` for Rust/Go, multi-arch JDK for Java, `dotnet publish -r`
+- Embed runtime: static binary for Go/Rust, JDK for Java, .NET runtime for .NET
+
+#### 8.2 Edge Cases for Existing Runtimes (Hardened)
+
+##### Node.js / TypeScript
+| Edge Case | Status | Implementation |
+|-----------|--------|----------------|
+| **pnpm workspaces** (monorepo) | ❌ | Detect `pnpm-workspace.yaml` + `workspace:*` protocol; run `pnpm install -r --offline` |
+| **Yarn Berry (v2/v3)** | ❌ | Detect `yarnrc.yml` + `.yarn/` + `packageManager` field; use Corepack |
+| **Turborepo** | ❌ | Detect `turbo.json`; run `turbo run build --filter=...` |
+| **Nx workspace** | ❌ | Detect `nx.json` + `workspace.json`; run `nx run-many --target=build` |
+| **TypeScript project references** | ❌ | Detect `references` in `tsconfig.json`; build in dependency order |
+| **Yarn workspaces v1** | ✅ Partial | Already works via `yarn.lock` |
+| **npm workspaces** | ⚠️ | Detect `"workspaces"` in package.json |
+| **Private registries** (npm/pip/cargo/go/composer) | ❌ | Parse `.npmrc`, `pip.conf`, `.cargo/config.toml`, `go.env`, `auth.json` |
+| **Native addons** (node-gyp, Cargo, go) | ⚠️ | Detect `binding.gyp`, `Cargo.toml` in deps; compile with target toolchain |
+| **TypeScript project references** | ❌ | Build in topological order |
+| **Bun** (runtime + pkg mgr) | ⚠️ | Detect `bun.lockb`; use `bun install` + `bun` runtime |
+| **ESM only** (`"type": "module"`) | ⚠️ | Detect `"type": "module"` in package.json |
+| **Private registries auth** | ❌ | Parse `.npmrc`/`auth.json`/`pip.conf`/`.cargo/config.toml`/`go.env`/`auth.json` |
+
+##### Python
+| Edge Case | Status | Implementation |
+|-----------|--------|----------------|
+| **uv workspaces** (uv 0.5+) | ❌ | Detect `uv.lock` + `[tool.uv.workspace]`; use `uv sync` |
+| **Poetry private repos** | ⚠️ | Parse `[tool.poetry.source]` in `pyproject.toml` |
+| **Conda environments** | ❌ | Detect `environment.yml`; use `conda env export` |
+| **pip private indexes** | ❌ | Parse `pip.conf` / `--index-url` / `--extra-index-url` / `--find-links` |
+| **uv + cross-platform wheels** | ❌ | `uv pip compile --platform=linux_x86_64` |
+| **Poetry dynamic versioning** | ❌ | Detect `poetry-dynamic-versioning` plugin |
+| **Multiple requirements files** | ❌ | Support `requirements-*.txt` patterns |
+| **Optional dependencies** | ⚠️ | Support `[project.optional-dependencies]` extras |
+
+##### Go
+| Edge Case | Status | Implementation |
+|-----------|--------|----------------|
+| **Go modules** (`go.mod`) | ⚠️ | Auto-detect; run `go build` / `go build -trimpath` |
+| **Private modules** | ❌ | Parse `GOPRIVATE`, `GOPROXY`, `.netrc`, `go env` |
+| **go.work workspaces** | ❌ | Detect `go.work`; build all modules |
+| **`replace` directives** | ❌ | Resolve local replacements |
+| **CGO** | ❌ | Require C compiler + cross-compile toolchain |
+| **Cross-compilation** | ❌ | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build` |
+| **Private registries** | ❌ | `GOPRIVATE`, `.netrc`, `GOPROXY` |
+
+##### Java / JVM
+| Edge Case | Status | Implementation |
+|-----------|--------|----------------|
+| **Maven wrapper** (`mvnw`) | ⚠️ | Detect `.mvn/wrapper/`; run `./mvnw package` |
+| **Gradle wrapper** (`gradlew`) | ⚠️ | Detect `gradlew` + `gradle/wrapper/`; run `./gradlew build` |
+| **Multi-module** | ⚠️ | Build all modules; handle parent POM |
+| **JDK version** | ❌ | Detect `.java-version`, `sdkman`, `jenv` |
+| **Private Maven repos** | ❌ | Parse `settings.xml` + `servers` + passwords |
+
+##### .NET
+| Edge Case | Status | Implementation |
+|-----------|--------|----------------|
+| **dotnet publish** | ⚠️ | Run `dotnet publish -c Release -r linux-x64 --self-contained` |
+| **NuGet.config** | ❌ | Parse `NuGet.config` for private feeds |
+| **global.json** (SDK version) | ❌ | Detect and use correct SDK |
+| **NuGet private feeds** | ❌ | Parse `packageSources` + credentials |
+
+#### 8.3 Cross-Cutting Missing Features
+
+| Feature | Priority | Implementation |
+|---------|----------|----------------|
+| **Private registry auth** (all languages) | P0 | Unified auth config: `erebus.auth.toml` or env vars; inject into build |
+| **Cross-compilation** (all languages) | P0 | `--target` flag per language; download target toolchains |
+| **Monorepo build orchestration** | P0 | Detect Turborepo/Nx/Cargo/Go/Poetry/uv workspaces; build in dep order |
+| **Pre/post build hooks** | P1 | npm: `preinstall`/`prepare`/`postinstall`; Cargo: `build.rs`; Gradle: tasks |
+| **Private registry auth** | P0 | Unified auth config file + env var injection |
+| **SBOM generation** | P1 | `erebus inspect --sbom` → SPDX/CycloneDX from `layers[]` |
+| **Build reproducibility** | P1 | `--reproducible` flag; deterministic timestamps, sorted entries |
+| **Build cache sharing** | P1 | Layer caching across builds (Docker-style layer cache) |
+| **Build scripts execution** | P0 | Run `npm run build`, `cargo build`, `go build`, `mvn package`, `dotnet publish` |
+| **Monorepo workspace support** | P0 | Turborepo/Nx/Cargo/Go/Poetry/uv/pnpm/yarn/npm workspaces |
+
+#### 8.4 Hardcore/Unpredictable Edge Cases (From GitHub Trending)
+
+| Edge Case | Why It Breaks | Mitigation |
+|-----------|---------------|------------|
+| **Git submodules** (private) | Submodule fetch fails without auth | Detect `.gitmodules`; fetch with credentials |
+| **Generated code at build** (protobuf, GraphQL, OpenAPI) | Code gen runs at build time | Detect `buf`, `protoc`, `graphql-codegen`; run before build |
+| **WASM + native deps** (wasm-pack + native) | Mixed toolchains | Detect `wasm-pack.toml` + `Cargo.toml` |
+| **Next.js 14+ middleware/edge runtime** | Edge runtime different from Node | Detect `middleware.ts` + `runtime = 'edge'` |
+| **Next.js App Router + Server Actions** | Server actions need special handling | Detect `app/` + `'use server'` |
+| **Astro / SvelteKit / Nuxt 3 / Remix** | Framework-specific build output | Detect config files; run framework build |
+| **Electron + native modules** | `node-gyp` + Electron headers | Detect `electron-builder`; use `electron-rebuild` |
+| **Tauri** (Rust + Web) | Rust + Web build | Detect `tauri.conf.json`; run `cargo tauri build` |
+| **Flutter** (Dart) | Not supported | Detect `pubspec.yaml` |
+| **React Native** (Metro + native) | Native iOS/Android build | ❌ Out of scope (mobile) |
+| **Private Git deps** (`git+ssh://`, `git+https://`) | Auth required | Parse `package.json`/`Cargo.toml`/`go.mod` for git deps |
+| **Huge repos** (>10GB) | Memory/disk pressure | Streaming copy; exclude `.git`; shallow clone |
+| **Symlink hell** (node_modules, .pnpm-store) | Copy loops, broken links | `--no-dereference` or skip node_modules |
+| **Case-sensitive FS on macOS/Windows** | Path collisions | Normalize paths; detect collisions |
+| **Hardcoded paths** (`/usr/bin/python`) | Breaks in sandbox | Rewrite shebangs; use `env` |
+| **Runtime version pinning** (`.nvmrc`, `.python-version`, `.tool-versions`) | Version mismatch | Detect and install exact version |
+| **Lockfile sync drift** | Lockfile != manifest | Run `npm ci` / `pip install --require-hashes` / `cargo fetch` |
+| **GitHub Actions / CI-only deps** | Missing in local build | Detect CI-only deps; warn or skip |
+| **Secret scanning** (leaked keys in repo) | Security risk | Scan for secrets before build; warn |
+
+#### 8.5 Implementation Priority Order
+
+| Phase | Deliverable | Target |
+|-------|-------------|--------|
+| **8.1** | Rust (Cargo) + Go support | 2 weeks |
+| **8.2** | Java/Gradle/Maven + .NET | 2 weeks |
+| **8.3** | Cross-compile (Rust/Go) + Private registries | 2 weeks |
+| **8.4** | Monorepo orchestration (Turborepo/Nx/Cargo/Go) | 2 weeks |
+| **8.5** | Java/Gradle wrapper + .NET publish | 1 week |
+| **8.6** | Swift/Kotlin/Scala (lower priority) | 2 weeks |
+| **8.7** | Hardcore edge cases (submodules, code gen, private deps) | 2 weeks |
+| **8.8** | Integration testing against 50+ trending repos | 1 week |
+
+---
+
 ### Future tools (separate crates)
 | Tool | Purpose |
 |------|---------|
@@ -125,6 +285,7 @@ ESP32, Zephyr, FreeRTOS, bare metal.
 | Capability-driven sandbox | RIoT Secure, CRA, IEC 62443 | ✅ Phase 5b done |
 | Model fingerprinting | mallorn: ~10ms version detection | Add to `erebus inspect` |
 | Tensor-aware diffing | mallorn (ZipNN), TinyMLDelta | For `erebus-mcu` patches |
+| **100% trending coverage** | GitHub trending analysis | Phase 8 implementation |
 
 ---
 
@@ -133,6 +294,8 @@ ESP32, Zephyr, FreeRTOS, bare metal.
 | If User Needs... | Use |
 |------------------|-----|
 | Linux edge gateway, single binary deploy | **erebus** (today) |
+| Desktop Linux app distribution | `erebus build --package-format flatpak` → Flatpak manifest |
+| Desktop Linux/Store app distribution | `erebus build --package-format snap` → snapcraft.yaml |
 | Bare-metal MCU (Cortex-M, ESP32), TinyML | **Minerva** / **TinyMLDelta** / **Zephyr LLEXT** |
 | Fleet orchestration, staged rollout | **erebus-fleet** (future) / Golioth / Balena |
 | Layer sharing across artifacts | **erebus-registry** (future) / S3-compatible |

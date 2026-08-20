@@ -62,6 +62,7 @@ pub fn run(args: BuildArgs, verbose: bool) -> Result<()> {
         gui: args.gui || config.build.gui.unwrap_or(false),
         encrypt: args.encrypt || config.build.encrypt.unwrap_or(false),
         squashfs: args.squashfs || config.build.squashfs.unwrap_or(false),
+        package_format: args.package_format,
         version_info: args.version_info.clone().or(config.package.version),
         author: args.author.clone().or(config.package.author),
         description: args.description.clone().or(config.package.description),
