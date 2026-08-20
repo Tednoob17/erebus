@@ -116,17 +116,16 @@ Un agent IA est un binaire erebus qui contient :
 
 ## Ce qui reste à faire
 
-### Phase 1 : Intégrer les couches dans le stub ✅ FAIT
+### Phase 1 : Intégrer les couches dans le stub ⏳ EN COURS
 
 **Objectif** : Le stub doit consommer le système de couches, pas le contourner.
-**Bloque** : agent IA, hot-swap, lazy loading, multi-agent, capabilities.
 
-1. ✅ **Faire lire `ArtifactMetadata.layers` par le stub** — `Metadata` struct dans `main.rs` a `layers: Vec<SerializableLayer>` + `entrypoint_layer: Option<String>` avec `#[serde(default)]` pour backward compat
+1. ✅ **Faire lire `ArtifactMetadata.layers` par le stub** — `Metadata` struct dans `main.rs` a `layers: Vec<SerializableLayer>` + `entrypoint_layer: Option<String>` avec `#[serde(default)]`
 2. ✅ **Utiliser les couches pour résoudre l'entrypoint** — `resolve_entrypoint()` dans `exec.rs` extrait interpreter/argv du layer quand `entrypoint_layer` présent ; `exec_app()` utilise `meta.effective_entrypoint()`
 3. ⏳ **Extraction couche par couche** — rootfs encore extrait en bloc ; extraction différée pour Phase 3 (lazy loading)
-4. ⏳ **Supprimer l'ancien `Metadata` plat** — gardé pour backward compat ; migration complète quand plus de binaires legacy
+4. ⏳ **Supprimer l'ancien `Metadata` plat** — gardé pour backward compat
 
-> ⚠️ Phase 1 **partiellement terminée** : le stub lit et utilise les couches pour la résolution d'entrypoint, mais l'extraction reste monolithique (extrait tout le rootfs d'un coup). Le trait `Entrypoint` dans `erebus-core/src/layer.rs` n'est pas utilisé par le stub — il a sa propre logique dans `exec.rs`.
+> ⚠️ Phase 1 **partiellement terminée** : le stub lit et utilise les couches pour la résolution d'entrypoint, mais l'extraction reste monolithique. Le trait `Entrypoint` de `layer.rs` n'est pas utilisé par le stub — il a sa propre logique dans `exec.rs`.
 
 ### Phase 2 : Hot-swap de couches ✅ FAIT
 
@@ -205,37 +204,30 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 
 > **Débloqué** — Phase 1 terminée, le stub lit `meta.layers` et applique les capabilities.
 
-### Phase 6 : Templates + multi-agent (2-3 jours)
+### Phase 6 : Templates + multi-agent ✅ FAIT
 
 **Objectif** : Supporter les cas d'usage au-delà des applications.
 
-1. **Templates de metadata** :
-   - `application` — comportement actuel (un runtime, un entrypoint)
-   - `agent` — modèle + prompt + runtime + toolcalls + capabilities réseau
-   - `service` — multi-service avec orchestration
-   - `plugin` — interface d'extension pour un hôte
-2. **Multi-agent** : un seul binaire contenant plusieurs agents
-   - `erebus build ./agents --entrypoint chat=chat.py --entrypoint code=code.py`
-   - Le stub résout quel agent lancer selon `argv[1]`
-   - Chaque agent a ses propres capabilities
-3. **Exemples concrets dans `examples/`** :
-   - `examples/python-agent/` — agent IA avec modèle locale + outils
-   - `examples/multi-agent/` — 3 agents dans un seul binaire
-   - `examples/microservice-cluster/` — 3 services avec orchestration
-   - `examples/hugo-plugin/` — plugin Hugo statique
-4. **Documentation** : guide de migration AppImage → erebus agents
+1. ✅ **Templates de metadata** — `ArtifactType` enum (`Application`/`Agent`/`Service`/`Plugin`) dans `erebus-core/src/metadata.rs`
+   - `artifact_type` field in `ArtifactMetadata` (default: `Application` pour backward compat)
+   - `--artifact-type` flag dans le CLI build
+2. ✅ **Multi-agent** — entrypoints nommés + sélecteur `argv[1]`/`--erebus-agent`
+   - `entrypoints: BTreeMap<String, Vec<String>>` + `multi_agent: bool` dans metadata
+   - `--entrypoint NAME=argv0,arg1,arg2` (repeatable) dans le CLI build
+   - Stub resolution: `select_agent_from_args()` → `--erebus-agent NAME` or `argv[1]`
+   - Argv stripping via `ERE_AGENT_SELECTED`/`ERE_AGENT_NAME` env vars (`exec.rs`)
+3. ⏳ **Exemples concrets** — `examples/python-agent/`, `examples/multi-agent/`, etc. pas encore créés
+4. ⏳ **Documentation** — guide migration AppImage → erebus agents pas encore écrit
 
----
+### Phase 7 : Operational Hardening ⏳
 
-## Priorité
-
-1. ✅ **Phase 1** (stub → couches) — **FAIT**. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `effective_runtime()`, `capabilities()`, `resolve_entrypoint()` consomment les couches
-2. ✅ **Phase 2** (hot-swap) — **FAIT**. `erebus swap` command avec SISR delta
-3. ✅ **Phase 5b** (capability-driven security) — **FAIT**. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
-4. ⏳ **Phase 3** (lazy loading) — **PROCHAINE**. Performance agent IA, mmap/FUSE, ne pas charger 7 Go au démarrage
-5. ⏳ **Phase 4** (registry CAS) — **Adoption**. Partager couches entre artefacts
-6. ⏳ **Phase 6** (templates + multi-agent) — **Storytelling**. Multi-agent, service, plugin
-7. ⏳ **Phase 7** (hardening) — **Observability + rollback + risk mitigation**
+1. ⏳ **Phase 1** (stub → couches) — En cours. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `capabilities()` consommés par le stub, mais extraction monolithique (pas de mmap/FUSE, pas d'extraction couche par couche)
+2. ✅ **Phase 2** (hot-swap) — Terminé. `erebus swap` command avec SISR delta
+3. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
+4. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags
+5. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
+6. **Phase 3** (lazy loading) — Performance agent IA, mmap/FUSE, ne pas charger 7 Go au démarrage
+7. **Phase 4** (registry CAS) — Adoption, partager couches entre artefacts
 
 ---
 
@@ -327,33 +319,6 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
 2. **ASCII diagrams dans le code source** : pas de diagrams dans les sources
 3. **Security audit deliverables** : `SECURITY-AUDIT.md` n'existe pas
 4. **Chaos testing CLI** : tests de fault injection dans `sisr/network_test.rs` mais pas comme commandes CLI
-
----
-
-## Phase 6: Templates + multi-agent ✅ IMPLÉMENTÉ
-
-**Objectif** : Supporter les cas d'usage au-delà des applications.
-
-### Déjà implémenté ✅
-
-1. **Templates de metadata** : `ArtifactType` enum (`Application`, `Agent`, `Service`, `Plugin`) dans `erebus-core/src/metadata.rs`
-   - `artifact_type` field in `ArtifactMetadata`
-   - Default: `Application` (backward compatible)
-   - Serialized as `artifact_type` in JSON
-
-2. **Multi-agent** : entrypoints nommés + sélecteur `argv[1]`/`--erebus-agent`
-   - `entrypoints: BTreeMap<String, Vec<String>>` in metadata
-   - `multi_agent: bool` flag
-   - Stub resolution: `select_agent_from_args()` → `--erebus-agent NAME` or `argv[1]`
-   - Argv stripping: `ERE_AGENT_SELECTED` + `ERE_AGENT_NAME` env vars → `exec.rs` strips from forwarded argv
-   - CLI `--entrypoint NAME=argv0,arg1,arg2` (repeatable) + `--artifact-type` flag
-
-3. **Exemples concrets** (à créer) :
-   - `examples/python-agent/`
-   - `examples/multi-agent/`
-   - `examples/microservice-cluster/`
-   - `examples/hugo-plugin/`
-
 
 ---
 
