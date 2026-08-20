@@ -1,0 +1,12 @@
+[project]
+name = "python-agent"
+version = "0.1.0"
+description = "AI agent with local GGUF model + tool runtime"
+requires-python = ">=3.10"
+
+[tool.erebus]
+artifact_type = "agent"
+
+[dependencies]
+# llama-cpp-python for GGUF inference (CPU-only, no GPU drivers needed)
+llama-cpp-python = ">=0.2.0"

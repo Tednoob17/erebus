@@ -1,0 +1,28 @@
+{
+  "name": "microservice-cluster",
+  "isolation": 2,
+  "artifact_type": "service",
+  "services": [
+    {
+      "name": "auth",
+      "command": ["python3", "/app/services/auth/app.py"],
+      "env": {"ERE_AUTH_PORT": "8001"},
+      "health_check": {"port": 8001, "endpoint": "/health", "enabled": true},
+      "restart": "Always"
+    },
+    {
+      "name": "api",
+      "command": ["python3", "/app/services/api/app.py"],
+      "env": {"ERE_API_PORT": "8000"},
+      "health_check": {"port": 8000, "endpoint": "/health", "enabled": true},
+      "restart": "Always"
+    },
+    {
+      "name": "worker",
+      "command": ["python3", "/app/services/worker/app.py"],
+      "env": {"ERE_WORKER_INTERVAL": "5"},
+      "health_check": {"port": 0, "endpoint": "/health", "enabled": false},
+      "restart": "Always"
+    }
+  ]
+}

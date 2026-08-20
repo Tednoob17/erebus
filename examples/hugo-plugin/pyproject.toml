@@ -1,0 +1,8 @@
+[project]
+name = "hugo-uppercase"
+version = "0.1.0"
+description = "Hugo plugin: uppercase text transformation"
+
+[tool.hugo.plugin]
+# Hugo loads this via the plugin system
+entrypoint = "plugin/__init__.py"

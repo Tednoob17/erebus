@@ -1,0 +1,7 @@
+[project]
+name = "multi-agent"
+version = "0.1.0"
+description = "Multi-agent binary: chat, code, and search agents in one erebus binary"
+
+[tool.erebus]
+artifact_type = "agent"

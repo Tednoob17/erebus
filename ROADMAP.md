@@ -216,18 +216,24 @@ erebus swap agent.ere config ./new-config.toml -o agent-v2.ere
    - `--entrypoint NAME=argv0,arg1,arg2` (repeatable) dans le CLI build
    - Stub resolution: `select_agent_from_args()` → `--erebus-agent NAME` or `argv[1]`
    - Argv stripping via `ERE_AGENT_SELECTED`/`ERE_AGENT_NAME` env vars (`exec.rs`)
-3. ⏳ **Exemples concrets** — `examples/python-agent/`, `examples/multi-agent/`, etc. pas encore créés
-4. ⏳ **Documentation** — guide migration AppImage → erebus agents pas encore écrit
+3. ✅ **Exemples concrets** — `examples/python-agent/`, `examples/multi-agent/`, `examples/microservice-cluster/`, `examples/hugo-plugin/` créés
+4. ✅ **Documentation** — guide migration AppImage → erebus agents (`docs/migration/appimage-to-erebus.md`)
 
-### Phase 7 : Operational Hardening ⏳
+---
+
+## Priorité
 
 1. ⏳ **Phase 1** (stub → couches) — En cours. `layers`, `entrypoint_layer`, `effective_entrypoint()`, `capabilities()` consommés par le stub, mais extraction monolithique (pas de mmap/FUSE, pas d'extraction couche par couche)
 2. ✅ **Phase 2** (hot-swap) — Terminé. `erebus swap` command avec SISR delta
 3. ✅ **Phase 5b** (capability-driven security) — Terminé. Seccomp + Landlock capability-driven (`from_capabilities()`, filtres dynamiques, tests)
-4. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags
+4. ✅ **Phase 6** (templates + multi-agent) — Terminé. `ArtifactType` enum, multi-agent entrypoints, `--erebus-agent` selector, `--artifact-type`/`--entrypoint` CLI flags, + examples + migration guide
 5. ⏳ **Phase 7** (hardening) — Partiellement fait. Feature flags (`--no-sisr`/`--no-sign`), error rescue map (pivot_root/seccomp fallbacks), rollback runbook ✅ ; reste Prometheus metrics + SECURITY-AUDIT.md
 6. **Phase 3** (lazy loading) — Performance agent IA, mmap/FUSE, ne pas charger 7 Go au démarrage
 7. **Phase 4** (registry CAS) — Adoption, partager couches entre artefacts
+
+---
+
+### Phase 7 : Operational Hardening ⏳
 
 ---
 
